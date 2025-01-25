@@ -1,8 +1,8 @@
 import cv2
 import pypdfium2 as pdfium
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 import numpy as np
-import os
+#import os
 import argparse
 
 import scipy.signal
@@ -10,7 +10,7 @@ import pandas as pd
 
 ###############################################################################
 def get_file(file_name):
-    return pdfium.PdfDocument(FILE)
+    return pdfium.PdfDocument(file_name)
 
 def get_number_of_pages(doc):
     return len(doc)
