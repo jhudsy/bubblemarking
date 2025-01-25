@@ -163,9 +163,9 @@ def get_matriculation_number(image,bars,**kwargs):
         answers = get_mark_indexes(line,area=area,**kwargs)
         for a in answers:
             matriculation_number += (i-2)*10**(7-a)
-            digits.add(a)
+            digits.append(a)
     #turn matriculation number into a 7 digit string with 0 padding as needed
-    if i in range(8):
+    for i in range(8):
         #if i does not appear in digits or it appears more than once, return None as an error
         if i not in digits or digits.count(i) > 1:
             return None
@@ -195,25 +195,33 @@ def get_all_answers(image,bars,**kwargs):
     return answer_map
 ###############################################################################
 def answers_to_string(answers):
-    #map 0 to A, 1 to B, 2 to C, 3 to D, 4 to E and return a comma separated string of the answers
-    ret = ""
-    for i in answers:
-        if len(answers[i]) == 0:
-            ret += ""
-        else:
-            ret += ",".join([chr(65+x) for x in answers[i]]) + ","
-    return ret
+    #answers is an array containing e.g. [0,2,4] which means the student has selected answers A,C,E
+    #we return a string "A,C,E"
+    if len(answers) == 0:
+        return ""
+    answer_string = ""
+    for a in answers:
+        answer_string += chr(65+a)+","
+    return answer_string[:-1]
 ###############################################################################
 def  compute_mark(answer,correct_answer):
-    """returns a tuple (mark,total) where mark is the number of correct answers and total is the total number of correct answers"""
-    mark = 0
+    """returns a triple (num_correct,num_incorrect) where num_correct is the number of correct answers and num_incorrect is the number of incorrect answers given"""
+    num_correct = 0
+    num_incorrect = 0
     #answer and correct_answer are strings of the form "A,B,C"
+    if len(answer) == 0: #handle the case where the student has not answered the question
+        return 0,0
+    
     answer = answer.split(",")
     correct_answer = correct_answer.split(",")
-    for a in answer:
+    
+    for a in answer:        
         if a in correct_answer:
-            mark += 1
-    return mark,len(correct_answer)
+            num_correct += 1
+        else:
+            num_incorrect += 1
+
+    return num_correct,num_incorrect
 
 ###############################################################################
 
@@ -224,7 +232,7 @@ if __name__ == "__main__":
     parser.add_argument('filename', type=str, help='The filename of the scanned exam.')
     parser.add_argument('output_filename', type=str, help='The filename of the output file.')
     parser.add_argument('--read_answers_from_file', type=str, help='The filename of the file containing the answers. If not present, answers should be read from a scanned image. with matriculation number 0000000')
-    parser.add_argument("--one_answer_only","allow only one answer per questions",default=False)
+    parser.add_argument("--one_answer_only",help="allow only one answer per questions",default=False)
 
     args = parser.parse_args()
     FILE = args.filename
@@ -238,7 +246,7 @@ if __name__ == "__main__":
     num_pages = get_number_of_pages(doc)
     print("Number of pages in document: ",num_pages)
 
-    answers = None
+    answers_df = None
     if READ_ANSWERS_FROM_FILE is not None:
         #the answer file is a xlsx or csv file with format
         #<question number>,<answer string>
@@ -246,11 +254,11 @@ if __name__ == "__main__":
         #start by checking the file format
         
         try:
-            answers = pd.read_csv(READ_ANSWERS_FROM_FILE,header=None,names=["Question","Answers"])
+            answers_df = pd.read_csv(READ_ANSWERS_FROM_FILE,header=None,names=["Question","Answers"])
         except:
-            answers = pd.read_excel(READ_ANSWERS_FROM_FILE,header=None,names=["Question","Answers"])
+            answers_df = pd.read_excel(READ_ANSWERS_FROM_FILE,header=None,names=["Question","Answers"])
     else:
-        answers = pd.DataFrame(columns=["Question","Answers"])
+        answers_df = pd.DataFrame(columns=["Question","Answers"])
 
     for i in range(num_pages):
         image = get_image_from_file(doc,i)
@@ -258,25 +266,41 @@ if __name__ == "__main__":
         if prepared_image is None:
             print("Unable to read page ",i)
             sys.exit(1)
-        answer_map = answers_to_string(get_all_answers(prepared_image,blackBars))
+        ans = get_all_answers(prepared_image,blackBars) #answers read from this page
+        answer_map = {} 
+        for j in ans:
+            answer_map[j] = answers_to_string(ans[j]) #answers for question j in the form "A,B,C"
+
         matriculation_number = get_matriculation_number(prepared_image,blackBars)
         print("Matriculation number: ",matriculation_number)
         if matriculation_number is None:
             print("WARNING: Unable to read matriculation number on page ",i)
             matriculation_number = "99999999"
-        #print("Answers: ",answer_map)
-        print("")
+        #print("Answer map:",answer_map)
+        #print("")
 
         if matriculation_number == "0000000" and READ_ANSWERS_FROM_FILE is None:
-            sheet_answers = answer_map
-            for j in sheet_answers:
-                if len(sheet_answers[j])!=0:
-                    answers = answers.append({"Question":j,"Answers":answers_to_string(sheet_answers[j])},ignore_index=True)
-                    if ONE_ANSWER_ONLY and len(sheet_answers[j])>1:
-                        print("WARNING: ANSWER SHEET has more than one answer for question ",j)
+            #read answers from the answer sheet
+            sheet_answers = answer_map #answers from the answer sheet
+            j = 1
+            while j in sheet_answers:
+                answers_df = pd.concat([answers_df,pd.DataFrame({
+                    "Question":[j],
+                    "Answers":[sheet_answers[j]]
+                })],ignore_index=True)
+                if ONE_ANSWER_ONLY and len(sheet_answers[j])>1:
+                    print("WARNING: ANSWER SHEET has more than one answer for question ",j)
         else:
+            #handle student answers
+            print("Student answers for matriculation number ",matriculation_number)
             for j in answer_map:
-                student_answer_df = student_answer_df.append({"Matriculation number":matriculation_number,"Question":j,"Answer":answers_to_string(answer_map[j])},ignore_index=True)
+                #print("student answer for question",j,answer_map[j])
+                student_answer_df = pd.concat([student_answer_df,pd.DataFrame({
+                    "Matriculation number":[matriculation_number],
+                    "Question":[j],
+                    "Answer":[answer_map[j]]
+                })],ignore_index=True)
+                
                 if ONE_ANSWER_ONLY and len(answer_map[j])>1:
                     print("WARNING: Student ",matriculation_number," has selected more than one answer for question ",j, " on page ",i)
 
@@ -285,32 +309,48 @@ if __name__ == "__main__":
     student_answer_df["Total"] = 0
     for i in range(len(student_answer_df)):
         question = student_answer_df.iloc[i]["Question"]
+        if question not in answers_df["Question"].values:
+            print("WARNING: Question ",question," not in answer sheet")
+            continue
         answer = student_answer_df.iloc[i]["Answer"]
-        correct_answer = answers[answers["Question"]==question]["Answers"].values[0]
-        mark,total = compute_mark(answer,correct_answer)
-        student_answer_df.at[i,"Mark"] = mark
-        student_answer_df.at[i,"Total"] = total
+        correct_answer = answers_df[answers_df["Question"]==question]["Answers"].values[0]
+        num_correct,num_incorrect = compute_mark(answer,correct_answer)
+
+        student_answer_df.at[i,"Correct"] = num_correct
+        student_answer_df.at[i,"Incorrect"] = num_incorrect
+    
 
     #create an output df with the columns Matriculation number, Question1, ..., QuestionN where N is the number of questions. The first row will have matriculation number 0000000 and the total number of correct answers for each question. E.g., if question 3 had 5 correct answers, the cell for question 3 will contain 5. We also have Question1Answer, ..., QuestionNAnswer where the first row will contain the correct answers for each question. E.g., if question 3 had answers A,B,C by the student the cell for Question3Answer will contain "A,B,C"
     output_df = pd.DataFrame(columns=["Matriculation number"])
     output_df["Matriculation number"] = ["0000000"]
     #compute total number of questions by looking at answers
-    total_questions = len(answers)
+    total_questions = len(answers_df)
     for i in range(1,total_questions+1):
-        output_df["Question"+str(i)] = len(answers[answers["Question"]==i]["Answers"].values[0].split(","))
-        output_df["Question"+str(i)+"Answer"] = answers[answers["Question"]==i]["Answers"].values[0]
+        output_df["Question"+str(i)+"NumCorrect"] = len(answers_df[answers_df["Question"]==i]["Answers"].values[0].split(","))
+        output_df["Question"+str(i)+"NumIncorrect"] = 0
+        output_df["Question"+str(i)+"Answer"] = answers_df[answers_df["Question"]==i]["Answers"].values[0]
+
+    #print(student_answer_df)
 
     #now fill in the student answers
     for i in range(len(student_answer_df)):
         matriculation_number = student_answer_df.iloc[i]["Matriculation number"]
         question = student_answer_df.iloc[i]["Question"]
         answer = student_answer_df.iloc[i]["Answer"]
-        mark = student_answer_df.iloc[i]["Mark"]
-        total = student_answer_df.iloc[i]["Total"]
+        num_correct = student_answer_df.iloc[i]["Correct"]
+        num_incorrect = student_answer_df.iloc[i]["Incorrect"]
+           
         if matriculation_number not in output_df["Matriculation number"].values:
-            output_df = output_df.append({"Matriculation number":matriculation_number},ignore_index=True)
-        output_df.at[output_df["Matriculation number"]==matriculation_number,"Question"+str(question)] = mark
-        output_df.at[output_df["Matriculation number"]==matriculation_number,"Question"+str(question)+"Answer"] = answer
+            output_df = pd.concat([output_df,pd.DataFrame({"Matriculation number":[matriculation_number]})],ignore_index=True)
+
+        if question<total_questions+1:
+            
+            index = output_df[output_df["Matriculation number"]==matriculation_number].index[0]
+
+            output_df.at[index,"Question"+str(question)+"NumCorrect"] = num_correct
+            output_df.at[index,"Question"+str(question)+"NumIncorrect"] = num_incorrect
+            output_df.at[index,"Question"+str(question)+"Answer"] = answer
+            
 
     output_df.to_csv(OUTPUT_FILE,index=False)
 
