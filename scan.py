@@ -283,15 +283,15 @@ if __name__ == "__main__":
 
         if matriculation_number == "0000000" and READ_ANSWERS_FROM_FILE is None:
             #read answers from the answer sheet
-            sheet_answers = answer_map #answers from the answer sheet
             j = 1
-            while j in sheet_answers:
+            while j in answer_map and answer_map[j] != "":
                 answers_df = pd.concat([answers_df,pd.DataFrame({
                     "Question":[j],
-                    "Answers":[sheet_answers[j]]
+                    "Answers":[answer_map[j]]
                 })],ignore_index=True)
-                if ONE_ANSWER_ONLY and len(sheet_answers[j])>1:
+                if ONE_ANSWER_ONLY and len(answer_map[j])>1:
                     print("WARNING: ANSWER SHEET has more than one answer for question ",j)
+                j += 1
         else:
             #handle student answers
             print("Student answers for matriculation number ",matriculation_number)
@@ -321,12 +321,12 @@ if __name__ == "__main__":
         student_answer_df.at[i,"Correct"] = num_correct
         student_answer_df.at[i,"Incorrect"] = num_incorrect
     
-
     #create an output df with the columns Matriculation number, Question1, ..., QuestionN where N is the number of questions. The first row will have matriculation number 0000000 and the total number of correct answers for each question. E.g., if question 3 had 5 correct answers, the cell for question 3 will contain 5. We also have Question1Answer, ..., QuestionNAnswer where the first row will contain the correct answers for each question. E.g., if question 3 had answers A,B,C by the student the cell for Question3Answer will contain "A,B,C"
     output_df = pd.DataFrame(columns=["Matriculation number"])
     output_df["Matriculation number"] = ["0000000"]
     #compute total number of questions by looking at answers
     total_questions = len(answers_df)
+    #add columns for each question and the number of correct answers and the correct answers using the answer_df dataframe
     for i in range(1,total_questions+1):
         output_df["Question"+str(i)+"NumCorrect"] = len(answers_df[answers_df["Question"]==i]["Answers"].values[0].split(","))
         output_df["Question"+str(i)+"NumIncorrect"] = 0
@@ -334,25 +334,25 @@ if __name__ == "__main__":
 
     #print(student_answer_df)
 
-    #now fill in the student answers
+    #now fill in the student answers into output_df
     for i in range(len(student_answer_df)):
         matriculation_number = student_answer_df.iloc[i]["Matriculation number"]
-        question = student_answer_df.iloc[i]["Question"]
-        answer = student_answer_df.iloc[i]["Answer"]
-        num_correct = student_answer_df.iloc[i]["Correct"]
-        num_incorrect = student_answer_df.iloc[i]["Incorrect"]
+        question = student_answer_df.iloc[i]["Question"] #question number
+        answer = student_answer_df.iloc[i]["Answer"] #answer string, e.g., "A,B,C"
+        num_correct = student_answer_df.iloc[i]["Correct"] #number of correct answers
+        num_incorrect = student_answer_df.iloc[i]["Incorrect"] #number of incorrect answers
            
         if matriculation_number not in output_df["Matriculation number"].values:
-            output_df = pd.concat([output_df,pd.DataFrame({"Matriculation number":[matriculation_number]})],ignore_index=True)
+            output_df = pd.concat([output_df,
+                                   pd.DataFrame({"Matriculation number":[matriculation_number]})],ignore_index=True)
 
-        if question<total_questions+1:
+        if question<total_questions+1: #only add the answer if it is a valid question
             
             index = output_df[output_df["Matriculation number"]==matriculation_number].index[0]
 
             output_df.at[index,"Question"+str(question)+"NumCorrect"] = num_correct
             output_df.at[index,"Question"+str(question)+"NumIncorrect"] = num_incorrect
             output_df.at[index,"Question"+str(question)+"Answer"] = answer
-            
 
     output_df.to_csv(OUTPUT_FILE,index=False)
 
