@@ -156,13 +156,19 @@ def get_mark_indexes(line,area=None,**kwargs):
 ###############################################################################    
 def get_matriculation_number(image,bars,**kwargs):
     matriculation_number = 0
+    digits = []
     area = kwargs.get("matriculation_number_area", (0.75,0.96))
     for i in range(2,12):
         line = image[bars[i][0]:bars[i][1],:].copy()
         answers = get_mark_indexes(line,area=area,**kwargs)
         for a in answers:
             matriculation_number += (i-2)*10**(7-a)
+            digits.add(a)
     #turn matriculation number into a 7 digit string with 0 padding as needed
+    if i in range(8):
+        #if i does not appear in digits or it appears more than once, return None as an error
+        if i not in digits or digits.count(i) > 1:
+            return None
     return str(matriculation_number).zfill(8)
 ###############################################################################
 def get_answers(line,**kwargs):
@@ -218,11 +224,13 @@ if __name__ == "__main__":
     parser.add_argument('filename', type=str, help='The filename of the scanned exam.')
     parser.add_argument('output_filename', type=str, help='The filename of the output file.')
     parser.add_argument('--read_answers_from_file', type=str, help='The filename of the file containing the answers. If not present, answers should be read from a scanned image. with matriculation number 0000000')
+    parser.add_argument("--one_answer_only","allow only one answer per questions",default=False)
 
     args = parser.parse_args()
     FILE = args.filename
     OUTPUT_FILE = args.output_filename
     READ_ANSWERS_FROM_FILE = args.read_answers_from_file
+    ONE_ANSWER_ONLY = args.one_answer_only
 
     student_answer_df = pd.DataFrame(columns=["Matriculation number","Question","Answer"]) #stores student answers
     
@@ -253,17 +261,24 @@ if __name__ == "__main__":
         answer_map = answers_to_string(get_all_answers(prepared_image,blackBars))
         matriculation_number = get_matriculation_number(prepared_image,blackBars)
         print("Matriculation number: ",matriculation_number)
+        if matriculation_number is None:
+            print("WARNING: Unable to read matriculation number on page ",i)
+            matriculation_number = "99999999"
         #print("Answers: ",answer_map)
         print("")
 
         if matriculation_number == "0000000" and READ_ANSWERS_FROM_FILE is None:
             sheet_answers = answer_map
-            for i in sheet_answers:
-                if len(sheet_answers[i])!=0:
-                    answers = answers.append({"Question":i,"Answers":answers_to_string(sheet_answers[i])},ignore_index=True)
+            for j in sheet_answers:
+                if len(sheet_answers[j])!=0:
+                    answers = answers.append({"Question":j,"Answers":answers_to_string(sheet_answers[j])},ignore_index=True)
+                    if ONE_ANSWER_ONLY and len(sheet_answers[j])>1:
+                        print("WARNING: ANSWER SHEET has more than one answer for question ",j)
         else:
-            for i in answer_map:
-                student_answer_df = student_answer_df.append({"Matriculation number":matriculation_number,"Question":i,"Answer":answers_to_string(answer_map[i])},ignore_index=True)
+            for j in answer_map:
+                student_answer_df = student_answer_df.append({"Matriculation number":matriculation_number,"Question":j,"Answer":answers_to_string(answer_map[j])},ignore_index=True)
+                if ONE_ANSWER_ONLY and len(answer_map[j])>1:
+                    print("WARNING: Student ",matriculation_number," has selected more than one answer for question ",j, " on page ",i)
 
     #compute marks
     student_answer_df["Mark"] = 0
