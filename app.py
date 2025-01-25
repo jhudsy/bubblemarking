@@ -2,7 +2,7 @@ import cv2
 import pypdfium2 as pdfium
 #import matplotlib.pyplot as plt
 import numpy as np
-#import os
+import sys
 import argparse
 
 import scipy.signal
@@ -248,9 +248,10 @@ if __name__ == "__main__":
         image = get_image_from_file(doc,i)
         prepared_image, blackBars = prepare_image(image)
         if prepared_image is None:
-            continue
+            print("Unable to read page ",i)
+            sys.exit(1)
         answer_map = answers_to_string(get_all_answers(prepared_image,blackBars))
-        matriculation_number = get_matriculation_number(prepared_image)
+        matriculation_number = get_matriculation_number(prepared_image,blackBars)
         print("Matriculation number: ",matriculation_number)
         #print("Answers: ",answer_map)
         print("")
