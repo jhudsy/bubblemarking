@@ -76,6 +76,8 @@ def find_black_bars(orig_image, **kwargs):
     return blackBars
 ###############################################################################
 def prepare_image(image, **kwargs):
+    if image.shape[0] < image.shape[1]: #if it's been loaded sideways
+        image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
     new_image = straighten_image(image, **kwargs)
     blackBars = find_black_bars(new_image, **kwargs)
     if blackBars == None:
@@ -214,7 +216,7 @@ def  compute_mark(answer,correct_answer):
     
     answer = answer.split(",")
     correct_answer = correct_answer.split(",")
-    
+
     for a in answer:        
         if a in correct_answer:
             num_correct += 1
