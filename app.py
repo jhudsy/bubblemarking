@@ -154,15 +154,16 @@ def get_mark_indexes(line,area=None,**kwargs):
     return answers
 
 ###############################################################################    
-def get_matriculation_number(line,**kwargs):
+def get_matriculation_number(image,bars,**kwargs):
     matriculation_number = 0
     area = kwargs.get("matriculation_number_area", (0.75,0.96))
     for i in range(2,12):
+        line = image[bars[i][0]:bars[i][1],:].copy()
         answers = get_mark_indexes(line,area=area,**kwargs)
         for a in answers:
             matriculation_number += (i-2)*10**(7-a)
     #turn matriculation number into a 7 digit string with 0 padding as needed
-    return str(matriculation_number).zfill(7)
+    return str(matriculation_number).zfill(8)
 ###############################################################################
 def get_answers(line,**kwargs):
     answer_bounds = kwargs.get("answer_bounds", [[0.14,0.29],[0.33,0.478],[0.525,0.675],[0.72,0.87]])
