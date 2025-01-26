@@ -38,6 +38,7 @@ def run_scan(scan_file,answer_file,email,one_answer_only):
         params.append(f"--answer_file={answer_file}")
 
     p = run(["python3", app.config["SCAN_SCRIPT"], scan_file, output_file, *params], capture_output=True)
+    p.wait()
 
     #send email
     msg = Message("Scan Results", sender=f"{email}", recipients=[email])
