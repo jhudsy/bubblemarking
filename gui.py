@@ -99,7 +99,7 @@ class Ui_MainWindow(object):
         self.ScanFileLabel.setText(_translate("MainWindow", "Scan file"))
         self.ScanFileSelectButton.setText(_translate("MainWindow", "Select"))
         self.OneAnswerCheckbox.setText(_translate("MainWindow", "Warn if there is more than one answer per question"))
-        self.AnswerInFileCheckbox.setText(_translate("MainWindow", "Answers in scan file"))
+        self.AnswerInFileCheckbox.setText(_translate("MainWindow", "Answers in scan file (matriculation number 00000000)"))
         self.AnswerFileLabel.setText(_translate("MainWindow", "Answer file"))
         self.AnswerFileSelectButton.setText(_translate("MainWindow", "Select"))
         self.OutputFileLabel.setText(_translate("MainWindow", "Output file"))

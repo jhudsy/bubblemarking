@@ -170,7 +170,7 @@ def get_matriculation_number(image,bars,**kwargs):
         for a in answers:
             matriculation_number += (i-2)*10**(7-a)
             digits.append(a)
-    #turn matriculation number into a 7 digit string with 0 padding as needed
+    #turn matriculation number into a 8 digit string with 0 padding as needed
     for i in range(8):
         #if i does not appear in digits or it appears more than once, return None as an error
         if i not in digits or digits.count(i) > 1:
@@ -235,7 +235,7 @@ def read_image_answers(image,**kwargs):
     df = pd.DataFrame(columns=["Matriculation number","Question","Answer"]) #stores student answers
     prepared_image, blackBars = prepare_image(image)
     if prepared_image is None:
-        logger.fatal("Unable to read page ",i)
+        logger.fatal(f"Unable to read page {i}")
         sys.exit(1)
     ans = get_all_answers(prepared_image,blackBars)
 
@@ -246,7 +246,7 @@ def read_image_answers(image,**kwargs):
 
     for j in ans:
         if ONE_ANSWER_ONLY and len(ans[j])>1:
-            logger.warning("WARNING: Student ",matriculation_number," has selected more than one answer for question ",j)
+            logger.warning(f"Student {matriculation_number} has selected more than one answer for question {j}")
         df = pd.concat([df,pd.DataFrame({
             "Matriculation number":[matriculation_number],
                 "Question":[j],
@@ -256,9 +256,9 @@ def read_image_answers(image,**kwargs):
 ###############################################################################
 def read_answers_from_file(filename):
     try:
-        answers_df = pd.read_csv(READ_ANSWERS_FROM_FILE,header=None,names=["Question","Answer"])
+        answers_df = pd.read_csv(filename,header=None,names=["Question","Answer"])
     except:
-        answers_df = pd.read_excel(READ_ANSWERS_FROM_FILE,header=None,names=["Question","Answer"])
+        answers_df = pd.read_excel(filename,header=None,names=["Question","Answer"])
     return answers_df
 ###############################################################################
 def read_answers_from_df(df,**kwargs):
@@ -276,7 +276,7 @@ def compute_marks(student_answer_df,answers_df):
     for i in range(len(student_answer_df)):
         question = student_answer_df.iloc[i]["Question"]
         if question not in answers_df["Question"].values:
-            logger.warning("Question ",question," not in answer sheet")
+            logger.warning(f"Question {question} not in answer sheet")
             continue
         answer = student_answer_df.iloc[i]["Answer"]
         correct_answer = answers_df[answers_df["Question"]==question]["Answer"].values[0]
@@ -319,7 +319,6 @@ def make_output_df(student_answer_df,answers_df):
             output_df.at[index,"Question"+str(question)+"Answer"] = answer
 
     return output_df
-
 ###############################################################################
 
 if __name__ == "__main__":
@@ -340,7 +339,7 @@ if __name__ == "__main__":
 
     doc = get_file(FILE)
     num_pages = get_number_of_pages(doc)
-    logger.info("Number of pages in document: ",num_pages)
+    logger.info(f"Number of pages in document: {num_pages}")
 
     student_answer_df = pd.DataFrame(columns=["Matriculation number","Question","Answer"]) #stores student answers
 
@@ -348,17 +347,17 @@ if __name__ == "__main__":
 
     #read the answers from the scanned image noting any issues.    
     for i in range(num_pages):
-        df = read_image_answers(get_image_from_file(doc,i))
+        df = read_image_answers(get_image_from_file(doc,i),ONE_ANSWER_ONLY=ONE_ANSWER_ONLY)
         if df["Matriculation number"].values[0] == "99999999":
-            logger.warning("Unable to read matriculation number on page ",i, ". Assigning matriculation number ",unknown_matriculation_number)
+            logger.warning(f"Unable to read matriculation number on page {i}. Assigning matriculation number {unknown_matriculation_number}")
             df["Matriculation number"] = unknown_matriculation_number
             unknown_matriculation_number -= 1
         else:
-            logger.info("Read matriculation number ",df["Matriculation number"].values[0]," on page ",i)
+            logger.info(f"Read matriculation number {df['Matriculation number'].values[0]} on page {i}")
         
         #check if matriculation number already exists in student_answer_df
         if df["Matriculation number"].values[0] in student_answer_df["Matriculation number"].values:
-            logger.warning("Duplicate matriculation number ",df["Matriculation number"].values[0]," on page ",i, "setting to",unknown_matriculation_number)
+            logger.warning(f"Duplicate matriculation number {df['Matriculation number'].values[0]} on page {i} setting to {unknown_matriculation_number}")
             df["Matriculation number"] = unknown_matriculation_number
             unknown_matriculation_number -= 1 
             

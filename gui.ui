@@ -58,7 +58,7 @@
      <item>
       <widget class="QCheckBox" name="AnswerInFileCheckbox">
        <property name="text">
-        <string>Answers in scan file</string>
+        <string>Answers in scan file (matriculation number 00000000)</string>
        </property>
        <property name="checked">
         <bool>true</bool>
