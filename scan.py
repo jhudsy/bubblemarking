@@ -8,6 +8,10 @@ import argparse
 import scipy.signal
 import pandas as pd
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 ###############################################################################
 def get_file(file_name):
     return pdfium.PdfDocument(file_name)
@@ -193,7 +197,7 @@ def get_all_answers(image,bars,**kwargs):
         answer_map[i-11+30] = answers[1]
         answer_map[i-11+60] = answers[2]
         answer_map[i-11+90] = answers[3]
-        #print("answers for ",i-11,i-11+30,i-11+60,i-11+90,":",answers)
+    
     return answer_map
 ###############################################################################
 def answers_to_string(answers):
@@ -226,101 +230,63 @@ def  compute_mark(answer,correct_answer):
     return num_correct,num_incorrect
 
 ###############################################################################
+def read_image_answers(image,**kwargs):
+    ONE_ANSWER_ONLY = kwargs.get("ONE_ANSWER_ONLY",False)
+    df = pd.DataFrame(columns=["Matriculation number","Question","Answer"]) #stores student answers
+    prepared_image, blackBars = prepare_image(image)
+    if prepared_image is None:
+        logger.fatal("Unable to read page ",i)
+        sys.exit(1)
+    ans = get_all_answers(prepared_image,blackBars)
 
-if __name__ == "__main__":
-    #argument are filename and output_filename. Additional arguments are --read_answers_from_file=<FILENAME> 
-
-    parser = argparse.ArgumentParser(description='Detects multiple choice answers from a scanned image of a multiple choice exam.')
-    parser.add_argument('filename', type=str, help='The filename of the scanned exam.')
-    parser.add_argument('output_filename', type=str, help='The filename of the output file.')
-    parser.add_argument('--read_answers_from_file', type=str, help='The filename of the file containing the answers. If not present, answers should be read from a scanned image. with matriculation number 0000000')
-    parser.add_argument("--one_answer_only",help="allow only one answer per questions",default=False)
-
-    args = parser.parse_args()
-    FILE = args.filename
-    OUTPUT_FILE = args.output_filename
-    READ_ANSWERS_FROM_FILE = args.read_answers_from_file
-    ONE_ANSWER_ONLY = args.one_answer_only
-
-    student_answer_df = pd.DataFrame(columns=["Matriculation number","Question","Answer"]) #stores student answers
+    matriculation_number = get_matriculation_number(prepared_image,blackBars)
     
-    doc = get_file(FILE)
-    num_pages = get_number_of_pages(doc)
-    print("Number of pages in document: ",num_pages)
-
-    answers_df = None
-    if READ_ANSWERS_FROM_FILE is not None:
-        #the answer file is a xlsx or csv file with format
-        #<question number>,<answer string>
-        #where <question number> is the question number and <answer string> is the answer string, for example 1,"A,B,D"
-        #start by checking the file format
-        
-        try:
-            answers_df = pd.read_csv(READ_ANSWERS_FROM_FILE,header=None,names=["Question","Answers"])
-        except:
-            answers_df = pd.read_excel(READ_ANSWERS_FROM_FILE,header=None,names=["Question","Answers"])
-    else:
-        answers_df = pd.DataFrame(columns=["Question","Answers"])
-
-    for i in range(num_pages):
-        image = get_image_from_file(doc,i)
-        prepared_image, blackBars = prepare_image(image)
-        if prepared_image is None:
-            print("Unable to read page ",i)
-            sys.exit(1)
-        ans = get_all_answers(prepared_image,blackBars) #answers read from this page
-        answer_map = {} 
-        for j in ans:
-            answer_map[j] = answers_to_string(ans[j]) #answers for question j in the form "A,B,C"
-
-        matriculation_number = get_matriculation_number(prepared_image,blackBars)
-        print("Matriculation number: ",matriculation_number)
-        if matriculation_number is None:
-            print("WARNING: Unable to read matriculation number on page ",i)
+    if matriculation_number is None:
             matriculation_number = "99999999"
-        #print("Answer map:",answer_map)
-        #print("")
 
-        if matriculation_number == "0000000" and READ_ANSWERS_FROM_FILE is None:
-            #read answers from the answer sheet
-            j = 1
-            while j in answer_map and answer_map[j] != "":
-                answers_df = pd.concat([answers_df,pd.DataFrame({
-                    "Question":[j],
-                    "Answers":[answer_map[j]]
-                })],ignore_index=True)
-                if ONE_ANSWER_ONLY and len(answer_map[j])>1:
-                    print("WARNING: ANSWER SHEET has more than one answer for question ",j)
-                j += 1
-        else:
-            #handle student answers
-            print("Student answers for matriculation number ",matriculation_number)
-            for j in answer_map:
-                #print("student answer for question",j,answer_map[j])
-                student_answer_df = pd.concat([student_answer_df,pd.DataFrame({
-                    "Matriculation number":[matriculation_number],
-                    "Question":[j],
-                    "Answer":[answer_map[j]]
-                })],ignore_index=True)
-                
-                if ONE_ANSWER_ONLY and len(answer_map[j])>1:
-                    print("WARNING: Student ",matriculation_number," has selected more than one answer for question ",j, " on page ",i)
-
-    #compute marks
-    student_answer_df["Mark"] = 0
-    student_answer_df["Total"] = 0
+    for j in ans:
+        if ONE_ANSWER_ONLY and len(ans[j])>1:
+            logger.warning("WARNING: Student ",matriculation_number," has selected more than one answer for question ",j)
+        df = pd.concat([df,pd.DataFrame({
+            "Matriculation number":[matriculation_number],
+                "Question":[j],
+                "Answer":[ans[j]]
+            })],ignore_index=True)
+    return df
+###############################################################################
+def read_answers_from_file(filename):
+    try:
+        answers_df = pd.read_csv(READ_ANSWERS_FROM_FILE,header=None,names=["Question","Answer"])
+    except:
+        answers_df = pd.read_excel(READ_ANSWERS_FROM_FILE,header=None,names=["Question","Answer"])
+    return answers_df
+###############################################################################
+def read_answers_from_df(df,**kwargs):
+    matriculation_number = kwargs.get("matriculation_number", "0000000")
+    answers_df = df[df["Matriculation number"]==matriculation_number]
+    answers_df = answers_df.drop(columns=["Matriculation number"])
+    #remove the row with matriculation number 0000000 from student_answer_df
+    df = df[student_answer_df["Matriculation number"]!=matriculation_number]
+    if len(answers_df) == 0:
+        logger.fatal("No answer sheet found in scans")
+        sys.exit(1)
+    return answers_df
+###############################################################################
+def compute_marks(student_answer_df,answers_df):
     for i in range(len(student_answer_df)):
         question = student_answer_df.iloc[i]["Question"]
         if question not in answers_df["Question"].values:
-            print("WARNING: Question ",question," not in answer sheet")
+            logger.warning("Question ",question," not in answer sheet")
             continue
         answer = student_answer_df.iloc[i]["Answer"]
-        correct_answer = answers_df[answers_df["Question"]==question]["Answers"].values[0]
+        correct_answer = answers_df[answers_df["Question"]==question]["Answer"].values[0]
         num_correct,num_incorrect = compute_mark(answer,correct_answer)
 
         student_answer_df.at[i,"Correct"] = num_correct
         student_answer_df.at[i,"Incorrect"] = num_incorrect
-    
+    return student_answer_df
+###############################################################################
+def make_output_df(student_answer_df,answers_df):
     #create an output df with the columns Matriculation number, Question1, ..., QuestionN where N is the number of questions. The first row will have matriculation number 0000000 and the total number of correct answers for each question. E.g., if question 3 had 5 correct answers, the cell for question 3 will contain 5. We also have Question1Answer, ..., QuestionNAnswer where the first row will contain the correct answers for each question. E.g., if question 3 had answers A,B,C by the student the cell for Question3Answer will contain "A,B,C"
     output_df = pd.DataFrame(columns=["Matriculation number"])
     output_df["Matriculation number"] = ["0000000"]
@@ -328,11 +294,9 @@ if __name__ == "__main__":
     total_questions = len(answers_df)
     #add columns for each question and the number of correct answers and the correct answers using the answer_df dataframe
     for i in range(1,total_questions+1):
-        output_df["Question"+str(i)+"NumCorrect"] = len(answers_df[answers_df["Question"]==i]["Answers"].values[0].split(","))
+        output_df["Question"+str(i)+"NumCorrect"] = len(answers_df[answers_df["Question"]==i]["Answer"].values[0].split(","))
         output_df["Question"+str(i)+"NumIncorrect"] = 0
-        output_df["Question"+str(i)+"Answer"] = answers_df[answers_df["Question"]==i]["Answers"].values[0]
-
-    #print(student_answer_df)
+        output_df["Question"+str(i)+"Answer"] = answers_df[answers_df["Question"]==i]["Answer"].values[0]
 
     #now fill in the student answers into output_df
     for i in range(len(student_answer_df)):
@@ -354,6 +318,63 @@ if __name__ == "__main__":
             output_df.at[index,"Question"+str(question)+"NumIncorrect"] = num_incorrect
             output_df.at[index,"Question"+str(question)+"Answer"] = answer
 
+    return output_df
+
+###############################################################################
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    #argument are filename and output_filename. Additional arguments are --read_answers_from_file=<FILENAME> 
+
+    parser = argparse.ArgumentParser(description='Detects multiple choice answers from a scanned image of a multiple choice exam.')
+    parser.add_argument('filename', type=str, help='The filename of the scanned exam.')
+    parser.add_argument('output_filename', type=str, help='The filename of the output file.')
+    parser.add_argument('--read_answers_from_file', help='The filename of the file containing the answers. If not present, answers should be read from a scanned image. with matriculation number 0000000',default=None)
+    parser.add_argument("--one_answer_only",help="allow only one answer per questions",default=False)
+
+    args = parser.parse_args()
+    FILE = args.filename
+    OUTPUT_FILE = args.output_filename
+    READ_ANSWERS_FROM_FILE = args.read_answers_from_file
+    ONE_ANSWER_ONLY = args.one_answer_only
+
+    doc = get_file(FILE)
+    num_pages = get_number_of_pages(doc)
+    logger.info("Number of pages in document: ",num_pages)
+
+    student_answer_df = pd.DataFrame(columns=["Matriculation number","Question","Answer"]) #stores student answers
+
+    unknown_matriculation_number = 99999999 #unknown matriculation number counter
+
+    #read the answers from the scanned image noting any issues.    
+    for i in range(num_pages):
+        df = read_image_answers(get_image_from_file(doc,i))
+        if df["Matriculation number"].values[0] == "99999999":
+            logger.warning("Unable to read matriculation number on page ",i, ". Assigning matriculation number ",unknown_matriculation_number)
+            df["Matriculation number"] = unknown_matriculation_number
+            unknown_matriculation_number -= 1
+        else:
+            logger.info("Read matriculation number ",df["Matriculation number"].values[0]," on page ",i)
+        
+        #check if matriculation number already exists in student_answer_df
+        if df["Matriculation number"].values[0] in student_answer_df["Matriculation number"].values:
+            logger.warning("Duplicate matriculation number ",df["Matriculation number"].values[0]," on page ",i, "setting to",unknown_matriculation_number)
+            df["Matriculation number"] = unknown_matriculation_number
+            unknown_matriculation_number -= 1 
+            
+        pd.concat([student_answer_df,df],ignore_index=True)
+                
+    #read the answers from the answer file or from student_answer_df        
+    answers_df = None
+    if READ_ANSWERS_FROM_FILE is not None:
+        answers_df = read_answers_from_file(READ_ANSWERS_FROM_FILE)
+    else:
+        answers_df = read_answers_from_df(student_answer_df)
+        
+    #compute marks
+    student_answer_df = compute_marks(student_answer_df,answers_df)
+    output_df = make_output_df(student_answer_df,answers_df)
+    
     output_df.to_csv(OUTPUT_FILE,index=False)
 
 
