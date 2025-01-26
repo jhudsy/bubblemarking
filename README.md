@@ -3,12 +3,12 @@ This program reads a University of Aberdeen MCQ marksheet and outputs the result
 Command line
 ============
 
-python3 scan.py will give relevant instructions.
+python3 -m bubblemarking will give relevant instructions.
 
 GUI
 ===
 
-python3 main.py will run the GUI.
+python3 -m bubblemarking.gui will run the GUI.
 
 The GUI was prepared using Qt6Designer. If any changes are made, you will need to run `pyuic6 -o gui.py gui.ui`; the designer outputs its results in gui.ui and this creates a gui.py file which main inherits from.
 
