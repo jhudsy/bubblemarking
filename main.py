@@ -1,11 +1,10 @@
 import logging
 import argparse
 import pandas as pd
-from scanning import get_file, get_number_of_pages, get_image_from_file, read_image_answers
-from dataframes import read_answers_from_file, read_answers_from_df, compute_marks, make_output_df
+from bubblemarking.scanning import get_file, get_number_of_pages, get_image_from_file, read_image_answers
+from bubblemarking.dataframes import read_answers_from_file, read_answers_from_df, compute_marks, make_output_df
 
-
-if __name__ == "__main__":
+def main():
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
     logging.basicConfig(format='"%(levelname)s - %(message)s')
@@ -62,6 +61,7 @@ if __name__ == "__main__":
     
     output_df.to_csv(OUTPUT_FILE,index=False)
 
-
+if __name__=="__main__":
+    main()
 
     
