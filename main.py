@@ -1,11 +1,14 @@
 import logging
 import argparse
 import pandas as pd
-from .scanning import get_file, get_number_of_pages, get_image_from_file, read_image_answers
-from .dataframes import read_answers_from_file, read_answers_from_df, compute_marks, make_output_df
+from scanning import get_file, get_number_of_pages, get_image_from_file, read_image_answers
+from dataframes import read_answers_from_file, read_answers_from_df, compute_marks, make_output_df
+
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logging.basicConfig(format='"%(levelname)s - %(message)s')
     #argument are filename and output_filename. Additional arguments are --read_answers_from_file=<FILENAME> 
 
     parser = argparse.ArgumentParser(description='Detects multiple choice answers from a scanned image of a multiple choice exam.')
