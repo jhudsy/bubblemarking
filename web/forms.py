@@ -1,6 +1,6 @@
 from flask_wtf import FlaskForm
 from wtfforms import SubmitField, BooleanField,TextAreaField,validators
-from flask_wtf.file iport FileField, FileRequired
+from flask_wtf.file import FileField, FileRequired
 
 class UploadForm(FlaskForm):
   scan_file = FileField('Scan File', validators = [FileRequired()])
