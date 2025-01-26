@@ -1,8 +1,10 @@
-from gui import Ui_MainWindow
-from PyQt6 import QtCore, QtGui, QtWidgets
+#from . gui import Ui_MainWindow
+from . import gui
+from PyQt6 import QtWidgets
 import pandas as pd
 
-import scan
+from .. import scanning
+from .. import dataframes
 import logging
 
 class WriteLogToWidgetHandler(logging.Handler):
@@ -14,9 +16,7 @@ class WriteLogToWidgetHandler(logging.Handler):
         msg = self.format(record)
         self.widget.append(msg)
 
-#add the custom handler to the root logger
-
-class AppMainWindow(Ui_MainWindow):
+class AppMainWindow(gui.Ui_MainWindow):
     def __init__(self, window):
         self.setupUi(window)
         self.ScanFileSelectButton.clicked.connect(self.select_scan_file)
@@ -58,12 +58,12 @@ class AppMainWindow(Ui_MainWindow):
 
         doc = None
         try:
-            doc = scan.get_file(scan_file)
+            doc = scanning.get_file(scan_file)
         except FileNotFoundError:
             QtWidgets.QMessageBox.warning(self.ScanButton, "Error", "Unable to open file")
             return
         
-        num_pages = scan.get_number_of_pages(doc)
+        num_pages = scanning.get_number_of_pages(doc)
         logging.info(f"Number of pages in document: {num_pages}")
 
         self.OutputTextArea.append("Scan complete")
@@ -73,7 +73,7 @@ class AppMainWindow(Ui_MainWindow):
 
         #read the answers from the scanned image noting any issues.    
         for i in range(num_pages):
-            df = scan.read_image_answers(scan.get_image_from_file(doc,i),ONE_ANSWER_ONLY=one_answer_only)
+            df = scanning.read_image_answers(scanning.get_image_from_file(doc,i),ONE_ANSWER_ONLY=one_answer_only)
             if df["Matriculation number"].values[0] == "99999999":
                 logging.warning("Unable to read matriculation number on page "+str(i)+". Assigning matriculation number "+str(unknown_matriculation_number))
                 df["Matriculation number"] = unknown_matriculation_number
@@ -86,20 +86,20 @@ class AppMainWindow(Ui_MainWindow):
             df["Matriculation number"] = unknown_matriculation_number
             unknown_matriculation_number -= 1 
             
-        pd.concat([student_answer_df,df],ignore_index=True)
+        student_answer_df = pd.concat([student_answer_df,df],ignore_index=True)
 
         answers_df = None
         if not answer_in_file:
             try:
-                answers_df = scan.read_answers_from_file(answer_file)
+                answers_df = dataframes.read_answers_from_file(answer_file)
             except FileNotFoundError:
                 QtWidgets.QMessageBox.warning(self.ScanButton, "Error", "Unable to open answer file")
                 return
         else:
-            answers_df = scan.read_answers_from_df(student_answer_df)
+            answers_df = dataframes.read_answers_from_df(student_answer_df)
         
-        student_answer_df = scan.compute_marks(student_answer_df,answers_df)
-        output_df = scan.make_output_df(student_answer_df,answers_df)
+        student_answer_df = dataframes.compute_marks(student_answer_df,answers_df)
+        output_df = dataframes.make_output_df(student_answer_df,answers_df)
 
         output_df.to_csv(output_file,index=False)
         logging.info("Output file written to ",output_file)

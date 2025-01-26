@@ -7,7 +7,7 @@ import os
 from forms import ScanForm
 
 UPLOAD_FOLDER = "uploads"
-SCAN_SCRIPT = "../scan.py"
+SCAN_SCRIPT = "bubblemarking"
 
 app = Flask(__name__)
 executor = Executor(app)
@@ -37,7 +37,7 @@ def run_scan(scan_file,answer_file,email,one_answer_only):
     if answer_file:
         params.append(f"--answer_file={answer_file}")
 
-    p = run(["python3", app.config["SCAN_SCRIPT"], scan_file, output_file, *params], capture_output=True)
+    p = run(["python3","-m", app.config["SCAN_SCRIPT"], scan_file, output_file, *params], capture_output=True)
     p.wait()
 
     #send email
