@@ -1,5 +1,5 @@
 from bubblemarking.gui.gui import Ui_MainWindow
-from PyQt6 import QtWidgets
+from PySide6 import QtWidgets
 import pandas as pd
 import sys
 
