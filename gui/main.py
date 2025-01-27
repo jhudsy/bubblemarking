@@ -3,8 +3,8 @@ from PySide6 import QtWidgets
 import pandas as pd
 import sys
 
-from bubblemarking.scanning import *
-from bubblemarking.dataframes import *
+import bubblemarking.scanning as scanning
+import bubblemarking.dataframes as dataframes
 import logging
 
 class WriteLogToWidgetHandler(logging.Handler):
