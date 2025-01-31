@@ -7,6 +7,8 @@ import bubblemarking.scanning as scanning
 import bubblemarking.dataframes as dataframes
 import logging
 
+
+
 class WriteLogToWidgetHandler(logging.Handler):
     def __init__(self, widget):
         super().__init__()
@@ -30,6 +32,7 @@ class AppMainWindow(Ui_MainWindow):
         self.menubar.setNativeMenuBar(True)
 
         logger = logging.getLogger()
+        logger.setLevel(logging.DEBUG)
         handler = WriteLogToWidgetHandler(widget=self.OutputTextArea)
         handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
         logger.addHandler(handler)
@@ -97,6 +100,9 @@ class AppMainWindow(Ui_MainWindow):
                 return
         else:
             answers_df = dataframes.read_answers_from_df(student_answer_df)
+        
+        if answers_df == None:
+            QtWidgets.QMessageBox.warning(self.ScanButton, "Error", "Unable to read answer file")
         
         student_answer_df = dataframes.compute_marks(student_answer_df,answers_df)
         output_df = dataframes.make_output_df(student_answer_df,answers_df)

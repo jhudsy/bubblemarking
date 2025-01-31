@@ -89,79 +89,97 @@ def prepare_image(image, **kwargs):
         return None,None
     return new_image, blackBars  
 ###############################################################################
+def find_right(line):
+    #used in offset calculations in get_mark_indexes function
+    line = cv2.cvtColor(line, cv2.COLOR_BGR2GRAY)
+    line = cv2.threshold(line, 200, 255, cv2.THRESH_BINARY)[1]
+    line = cv2.erode(line,np.ones([3,3]),iterations=2)
+    #invert image
+    line = cv2.bitwise_not(line)
+    for i in range(line.shape[1]-1,0,-1):
+        if np.sum(line[5:25,i]) > 0 and np.sum(line[:,i-1]) == 0:
+            return i
+###############################################################################
+
 def get_mark_indexes(line,area=None,**kwargs):
-    answers = []
-    num_dilations = kwargs.get("num_dilations", 2)
-    h_thresh = kwargs.get("h_thresh", 90)
-    s_thresh = kwargs.get("s_thresh", 90)
-    v_thresh = kwargs.get("v_thresh", 200)    
-    window_width = kwargs.get("window_width", 60) #the width of the letters on the answer sheet
-    #line is a color image
+    #area is an offset of start and end point of the line to search for marks. Assume area[0]<area[1]<=0
+    #additional arguments:
+    #offsets is an array of offsets to search for marks, they should all be negative
+    #threshold is the threshold for deciding whether a mark is filled or not
+    #distance_from_threshold is the allowable distance from offset where a mark can appear
+    #mask width is the width of the mask to search for marks
 
-    line = line[:,int(line.shape[1]*area[0]):int(line.shape[1]*area[1])]
-    line = cv2.cvtColor(line, cv2.COLOR_BGR2HSV)
-    h = line[:,:,0]
-    s = line[:,:,1]
-    v = line[:,:,2]
-    _,h = cv2.threshold(h, h_thresh, 255, cv2.THRESH_BINARY)
-    _,s = cv2.threshold(s, s_thresh, 255, cv2.THRESH_BINARY)
-    _,v = cv2.threshold(v, v_thresh, 255, cv2.THRESH_BINARY)
+    offsets = kwargs.get("offsets", None)
+    threshold = kwargs.get("threshold", 200000) #given a 60x30 mask we want at least 65% of the pixels to be black
+    distance_from_threshold = kwargs.get("distance_from_threshold", 10)
+    mask_width = kwargs.get("mask_width", 60)
+    peak_distance = kwargs.get("peak_distance", 50)
+    peak_prominence = kwargs.get("peak_prominence", 10000)
 
-    mark_mask = np.logical_and(h == 255, v == 0)
-    mark_mask_location = np.where(mark_mask, 255, 0)
+    line = line.copy()
     
-    mark_mask_location = mark_mask_location.astype(np.uint8)
-    #dilate the mask location
+    #if we are using the offset method, compute the right origin from which absolute coordinates will be computed
+    offset_points = []
+    if offsets is not None:
+       right = find_right(line)
+       for o in offsets:
+              #offsets should be less than 0
+              assert(o < 0)
+              offset_points.append(right+o)
     
-    mark_mask_location = cv2.dilate(mark_mask_location, np.ones((3,3),np.uint8), iterations=num_dilations)
+    #now we use the masking method to search the area and get points too
+    line = cv2.cvtColor(line, cv2.COLOR_BGR2GRAY)
+    line = cv2.threshold(line, 200, 255, cv2.THRESH_BINARY)[1]
+    #invert image
+    line = cv2.bitwise_not(line)
 
-    #we now introduce a new mask on the h and s channels
-    hsmask = np.logical_and(h == 255, s == 255)
-    hsmask_location = np.where(hsmask, 255, 0)
-    hsmask_location = hsmask_location.astype(np.uint8) 
-    #dilate hsmask_location
-    hsmask_location = cv2.dilate(hsmask_location, np.ones((3,3),np.uint8), iterations=num_dilations)
-
-    #the mark_mask_location will have a strong white area where the student has marked the answer
-    #the hsmask_location will have a strong white area where the answer letters are.
-
-    #try add blur to both
-    mark_mask_location = cv2.GaussianBlur(mark_mask_location,(7,7),0)
-    hsmask_location = cv2.GaussianBlur(hsmask_location,(7,7),0)
+    mask = np.ones([line.shape[0],mask_width])
+    conv = np.zeros([line.shape[1]-mask_width])
+    for i in range(conv.shape[0]):
+        window = line[:,i:i+mask_width]
+        conv[i] = np.sum(window*mask)
     
-    mask_value = np.zeros([line.shape[1]-window_width]) #this is the mask for the hsmask_location containing the multiple choice letters
-    ans_mask_value = np.zeros([line.shape[1]-window_width]) #this is the mask for the mark_mask_location containing the student answers
+    peak_points = scipy.signal.find_peaks(conv,
+                                    distance=peak_distance,prominence=peak_prominence)[0]
+    
+    #filter out peak points not in area
+    if area is not None:
+        assert(area[0] < area[1])
+        assert(area[1]< 0 )
+        #area is an offset from the right, turn it into an absolute coordinates
+        area[0] = right + area[0]
+        area[1] = right + area[1]
+        peak_points = [p for p in peak_points if p > area[0]*line.shape[1] and p < area[1]*line.shape[1]]
 
-    #count number of white pixels in the window for the two masks and fill them in.
-    for x in range(line.shape[1]-window_width//2,window_width//2,-1):
-        window = hsmask_location[:,x-window_width//2:x+window_width//2]
-        mask_value[x-1-window_width//2] = np.sum(window)
-
-        window = mark_mask_location[:,x-window_width//2:x+window_width//2]
-        ans_mask_value[x-1-window_width//2] = np.sum(window)
-    
-    answer_peaks = scipy.signal.find_peaks(ans_mask_value,distance=50,height=200000)
-    two_peaks = scipy.signal.find_peaks(mask_value,distance=50,height=100000)
-    
-    for i in range(len(two_peaks[0])):    
-        closest_distance = 100000
-        for j in range(len(answer_peaks[0])):
-            distance = abs(two_peaks[0][i]-answer_peaks[0][j])
-            if distance < closest_distance:
-                closest_distance = distance
-    
-        if closest_distance < 10:
-            answers.append(i)
-        else:
+    #we go through peak_points looking whether they are within distance_from_threshold of any offset_points and we keep them. If there are any offset_points remaining we add them to the list
+    point_list = []
+    for p in peak_points:
+        if len(offset_points) == 0: #handle case where no offset points were given
+            point_list.append(p)
             continue
-        #add the answers to the answer list as a tuple containing the index of True answers 
-    return answers
+        for o in offset_points:
+            if abs(p-o) < distance_from_threshold:
+                point_list.append(p)
+                offset_points.remove(o)
+                break
+    for o in offset_points:
+        point_list.append(o)
 
+    answers = []
+    for p in point_list:
+        if np.sum(line[:,p-mask_width//2:p+mask_width//2]) > threshold:
+            answers.append(p)
+    return answers
+    
 ###############################################################################    
 def get_matriculation_number(image,bars,**kwargs):
     matriculation_number = 0
     digits = []
-    area = kwargs.get("matriculation_number_area", (0.75,0.96))
+    area = kwargs.get("area", [-658,-32])
+    offsets = kwargs.get("matriculation_number_offsets", [-594, -522, -449, -377, -305, -233, -161, -89])
+    #add offsets to kwargs if not there
+    if "offsets" not in kwargs:
+        kwargs["offsets"] = offsets
     for i in range(2,12):
         line = image[bars[i][0]:bars[i][1],:].copy()
         answers = get_mark_indexes(line,area=area,**kwargs)
@@ -173,14 +191,20 @@ def get_matriculation_number(image,bars,**kwargs):
         #if i does not appear in digits or it appears more than once, return None as an error
         if i not in digits or digits.count(i) > 1:
             return None
+    logging.debug("Matriculation number: "+str(matriculation_number))
     return str(matriculation_number).zfill(8)
 ###############################################################################
 def get_answers(line,**kwargs):
+    offsets = [[-2397,-2325,-2252,-2180,-2108],
+               [-1819,-1747,-1674,-1602,-1530],
+               [-1241,-1169,-1096,-1024,-951],
+               [-663,-590,-519,-446,-374]]
+    areas = [[-2457,-2048],[-1877,-1470],[-1301,-891],[-723,-314]]
     answer_bounds = kwargs.get("answer_bounds", [[0.14,0.29],[0.33,0.478],[0.525,0.675],[0.72,0.87]])
 
     answers = []
     for a in answer_bounds:
-        answers.append(get_mark_indexes(line,area=a,**kwargs))
+        answers.append(get_mark_indexes(line,area=a,offsets=offsets.pop(0),**kwargs))
 
     return answers
 ###############################################################################
@@ -195,6 +219,8 @@ def get_all_answers(image,bars,**kwargs):
         answer_map[i-11+30] = answers[1]
         answer_map[i-11+60] = answers[2]
         answer_map[i-11+90] = answers[3]
+    
+    logging.debug(f"Answer map: {answer_map}")
     
     return answer_map
 ###############################################################################
