@@ -246,7 +246,7 @@ def get_answers(line,**kwargs):
 def get_all_answers(image,bars,**kwargs):
     answer_map = {}
     
-    for i in range(12,14):
+    for i in range(12,42): 
         line = image[bars[i][0]:bars[i][1],:].copy()
         answers = get_answers(line, **kwargs)
         #answers are for questions (i-11),(i-11)+30,(i-11)+60 and (i-11)+90
