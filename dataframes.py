@@ -17,7 +17,7 @@ def read_answers_from_df(df,**kwargs):
     df = df[df["Matriculation number"]!=matriculation_number]
     if len(answers_df) == 0:
         logging.fatal("No answer sheet found in scans")
-        sys.exit(1)
+        #sys.exit(1)
     return answers_df
 ###############################################################################
 def  compute_mark(answer,correct_answer):

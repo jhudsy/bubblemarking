@@ -1,12 +1,14 @@
 import cv2
 import pypdfium2 as pdfium
-#import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 import numpy as np
 import sys
 import argparse
 
 import scipy.signal
 import pandas as pd
+
+from copy import deepcopy
 
 import logging
 
@@ -96,9 +98,18 @@ def find_right(line):
     line = cv2.erode(line,np.ones([3,3]),iterations=2)
     #invert image
     line = cv2.bitwise_not(line)
+    count = 0
     for i in range(line.shape[1]-1,0,-1):
-        if np.sum(line[5:25,i]) > 0 and np.sum(line[:,i-1]) == 0:
+        if np.sum(line[5:25,i]) > 4000:
+            count += 1
+        elif count<60: #N.B. Constant here
+            count = 0
+        else: #we have found a white cell and count is more than 60
+            #plt.imshow(line[:,i:],cmap="gray")
+            #plt.show()
             return i
+    print("Error, black bar not found")
+    return None
 ###############################################################################
 
 def get_mark_indexes(line,area=None,**kwargs):
@@ -109,34 +120,40 @@ def get_mark_indexes(line,area=None,**kwargs):
     #distance_from_threshold is the allowable distance from offset where a mark can appear
     #mask width is the width of the mask to search for marks
 
-    offsets = kwargs.get("offsets", None)
-    threshold = kwargs.get("threshold", 200000) #given a 60x30 mask we want at least 65% of the pixels to be black
+    area = deepcopy(area)
+    offsets = deepcopy(kwargs.get("offsets", None))
+    threshold = kwargs.get("threshold", 380000) #given a 60x30 mask we want at least 65% of the pixels to be black
     distance_from_threshold = kwargs.get("distance_from_threshold", 10)
     mask_width = kwargs.get("mask_width", 60)
     peak_distance = kwargs.get("peak_distance", 50)
     peak_prominence = kwargs.get("peak_prominence", 10000)
+    binary_threshold = kwargs.get("binary_threshold", 150) #threshold for converting to binary image
+    one_answer_per_line = kwargs.get("one_answer_per_line", False)
 
-    line = line.copy()
+    
+    right = find_right(line)
+    #plt.imshow(line)
+    #plt.show()
+    #print("right:",right)
     
     #if we are using the offset method, compute the right origin from which absolute coordinates will be computed
     offset_points = []
     if offsets is not None:
-       right = find_right(line)
        for o in offsets:
               #offsets should be less than 0
               assert(o < 0)
               offset_points.append(right+o)
     
     #now we use the masking method to search the area and get points too
-    line = cv2.cvtColor(line, cv2.COLOR_BGR2GRAY)
-    line = cv2.threshold(line, 200, 255, cv2.THRESH_BINARY)[1]
+    peak_line = cv2.cvtColor(line, cv2.COLOR_BGR2GRAY)
+    peak_line = cv2.threshold(peak_line, binary_threshold, 255, cv2.THRESH_BINARY)[1]
     #invert image
-    line = cv2.bitwise_not(line)
+    peak_line = cv2.bitwise_not(peak_line)
 
-    mask = np.ones([line.shape[0],mask_width])
-    conv = np.zeros([line.shape[1]-mask_width])
+    mask = np.ones([peak_line.shape[0],mask_width])
+    conv = np.zeros([peak_line.shape[1]-mask_width])
     for i in range(conv.shape[0]):
-        window = line[:,i:i+mask_width]
+        window = peak_line[:,i:i+mask_width]
         conv[i] = np.sum(window*mask)
     
     peak_points = scipy.signal.find_peaks(conv,
@@ -145,11 +162,16 @@ def get_mark_indexes(line,area=None,**kwargs):
     #filter out peak points not in area
     if area is not None:
         assert(area[0] < area[1])
-        assert(area[1]< 0 )
+        assert(area[1] < 0)
         #area is an offset from the right, turn it into an absolute coordinates
         area[0] = right + area[0]
         area[1] = right + area[1]
-        peak_points = [p for p in peak_points if p > area[0]*line.shape[1] and p < area[1]*line.shape[1]]
+        peak_points = [p for p in peak_points if p > area[0]*peak_line.shape[1] and 
+        p < area[1]*line.shape[1]]
+
+        #plt.imshow(line[:,area[0]:area[1]])
+        #plt.show()
+
 
     #we go through peak_points looking whether they are within distance_from_threshold of any offset_points and we keep them. If there are any offset_points remaining we add them to the list
     point_list = []
@@ -165,10 +187,22 @@ def get_mark_indexes(line,area=None,**kwargs):
     for o in offset_points:
         point_list.append(o)
 
+    
+    #threshold on red channel only
+    rline = line[:,:,0]
+    rline = cv2.threshold(rline, 180, 255, cv2.THRESH_BINARY)[1]
+    
+
     answers = []
+    i=0
     for p in point_list:
-        if np.sum(line[:,p-mask_width//2:p+mask_width//2]) > threshold:
-            answers.append(p)
+        #print(i,"Sum:",np.sum(rline[:,p-mask_width//2:p+mask_width//2]))
+        #plt.imshow(rline[:,p-mask_width//2:p+mask_width//2],cmap="gray")
+        #plt.show()
+        if np.sum(rline[:,p-mask_width//2:p+mask_width//2]) < threshold:         
+            #print("FOUND!!!")
+            answers.append(i)
+        i+=1
     return answers
     
 ###############################################################################    
@@ -180,12 +214,14 @@ def get_matriculation_number(image,bars,**kwargs):
     #add offsets to kwargs if not there
     if "offsets" not in kwargs:
         kwargs["offsets"] = offsets
+    
     for i in range(2,12):
         line = image[bars[i][0]:bars[i][1],:].copy()
         answers = get_mark_indexes(line,area=area,**kwargs)
         for a in answers:
             matriculation_number += (i-2)*10**(7-a)
             digits.append(a)
+    print(digits)
     #turn matriculation number into a 8 digit string with 0 padding as needed
     for i in range(8):
         #if i does not appear in digits or it appears more than once, return None as an error
@@ -200,10 +236,9 @@ def get_answers(line,**kwargs):
                [-1241,-1169,-1096,-1024,-951],
                [-663,-590,-519,-446,-374]]
     areas = [[-2457,-2048],[-1877,-1470],[-1301,-891],[-723,-314]]
-    answer_bounds = kwargs.get("answer_bounds", [[0.14,0.29],[0.33,0.478],[0.525,0.675],[0.72,0.87]])
 
     answers = []
-    for a in answer_bounds:
+    for a in areas:
         answers.append(get_mark_indexes(line,area=a,offsets=offsets.pop(0),**kwargs))
 
     return answers
@@ -211,7 +246,7 @@ def get_answers(line,**kwargs):
 def get_all_answers(image,bars,**kwargs):
     answer_map = {}
     
-    for i in range(12,42):
+    for i in range(12,14):
         line = image[bars[i][0]:bars[i][1],:].copy()
         answers = get_answers(line, **kwargs)
         #answers are for questions (i-11),(i-11)+30,(i-11)+60 and (i-11)+90
