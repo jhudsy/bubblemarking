@@ -128,10 +128,10 @@ def get_question_answers(image,question_number,bars,right_bar_cache,**kwargs):
                [-1241,-1169,-1096,-1024,-951],
                [-663,-590,-519,-446,-374]]
     
-    window_height = kwargs.get("window_height", 0.8)
-    window_size = kwargs.get("window_size", 60)
-    threshold = kwargs.get("threshold", 0.7)
-    red_threshold = kwargs.get("red_threshold", 200)
+    window_height = kwargs.get("window_height", 1)
+    window_size = kwargs.get("window_size", 58)
+    threshold = kwargs.get("threshold", 0.75)
+    red_threshold = kwargs.get("red_threshold", 170)
     one_answer_only = kwargs.get("one_answer_only", False)
 
     #the column we need is question_number//30 and the bar we need is 12+question_number%30
@@ -147,6 +147,7 @@ def get_question_answers(image,question_number,bars,right_bar_cache,**kwargs):
         window = line[int((1-window_height)*line.shape[0]):int(window_height*line.shape[0]),right+offset[i]-window_size//2:right+offset[i]+window_size//2].copy()
         window = window[:,:,0] #take only the red channel
         window = cv2.threshold(window, red_threshold, 255, cv2.THRESH_BINARY)[1]
+        window=cv2.erode(window,np.ones([3,3]),iterations=2)
         brightness_array[i] = np.sum(window)
     
     #print(question_number,brightness_array)
