@@ -108,153 +108,101 @@ def find_right(line):
             #plt.imshow(line[:,i:],cmap="gray")
             #plt.show()
             return i
-    print("Error, black bar not found")
+    logging.critical("Error, black bar not found")
     return None
 ###############################################################################
-
-def get_mark_indexes(line,area=None,**kwargs):
-    #area is an offset of start and end point of the line to search for marks. Assume area[0]<area[1]<=0
+def get_question_answers(image,question_number,bars,right_bar_cache,**kwargs):
+    #image is the image
+    #question_number is the question number
+    #bars is the black bars
+    #right_bar_cache is a cache of the right bar for each question
     #additional arguments:
-    #offsets is an array of offsets to search for marks, they should all be negative
-    #threshold is the threshold for deciding whether a mark is filled or not
-    #distance_from_threshold is the allowable distance from offset where a mark can appear
-    #mask width is the width of the mask to search for marks
-
-    area = deepcopy(area)
-    offsets = deepcopy(kwargs.get("offsets", None))
-    threshold = kwargs.get("threshold", 380000) #given a 60x30 mask we want at least 65% of the pixels to be black
-    distance_from_threshold = kwargs.get("distance_from_threshold", 10)
-    mask_width = kwargs.get("mask_width", 60)
-    peak_distance = kwargs.get("peak_distance", 50)
-    peak_prominence = kwargs.get("peak_prominence", 10000)
-    binary_threshold = kwargs.get("binary_threshold", 150) #threshold for converting to binary image
-    one_answer_per_line = kwargs.get("one_answer_per_line", False)
-
-    
-    right = find_right(line)
-    #plt.imshow(line)
-    #plt.show()
-    #print("right:",right)
-    
-    #if we are using the offset method, compute the right origin from which absolute coordinates will be computed
-    offset_points = []
-    if offsets is not None:
-       for o in offsets:
-              #offsets should be less than 0
-              assert(o < 0)
-              offset_points.append(right+o)
-    
-    #now we use the masking method to search the area and get points too
-    peak_line = cv2.cvtColor(line, cv2.COLOR_BGR2GRAY)
-    peak_line = cv2.threshold(peak_line, binary_threshold, 255, cv2.THRESH_BINARY)[1]
-    #invert image
-    peak_line = cv2.bitwise_not(peak_line)
-
-    mask = np.ones([peak_line.shape[0],mask_width])
-    conv = np.zeros([peak_line.shape[1]-mask_width])
-    for i in range(conv.shape[0]):
-        window = peak_line[:,i:i+mask_width]
-        conv[i] = np.sum(window*mask)
-    
-    peak_points = scipy.signal.find_peaks(conv,
-                                    distance=peak_distance,prominence=peak_prominence)[0]
-    
-    #filter out peak points not in area
-    if area is not None:
-        assert(area[0] < area[1])
-        assert(area[1] < 0)
-        #area is an offset from the right, turn it into an absolute coordinates
-        area[0] = right + area[0]
-        area[1] = right + area[1]
-        peak_points = [p for p in peak_points if p > area[0]*peak_line.shape[1] and 
-        p < area[1]*line.shape[1]]
-
-        #plt.imshow(line[:,area[0]:area[1]])
-        #plt.show()
-
-
-    #we go through peak_points looking whether they are within distance_from_threshold of any offset_points and we keep them. If there are any offset_points remaining we add them to the list
-    point_list = []
-    for p in peak_points:
-        if len(offset_points) == 0: #handle case where no offset points were given
-            point_list.append(p)
-            continue
-        for o in offset_points:
-            if abs(p-o) < distance_from_threshold:
-                point_list.append(p)
-                offset_points.remove(o)
-                break
-    for o in offset_points:
-        point_list.append(o)
-
-    
-    #threshold on red channel only
-    rline = line[:,:,0]
-    rline = cv2.threshold(rline, 180, 255, cv2.THRESH_BINARY)[1]
-    
-
-    answers = []
-    i=0
-    for p in point_list:
-        #print(i,"Sum:",np.sum(rline[:,p-mask_width//2:p+mask_width//2]))
-        #plt.imshow(rline[:,p-mask_width//2:p+mask_width//2],cmap="gray")
-        #plt.show()
-        if np.sum(rline[:,p-mask_width//2:p+mask_width//2]) < threshold:         
-            #print("FOUND!!!")
-            answers.append(i)
-        i+=1
-    return answers
-    
-###############################################################################    
-def get_matriculation_number(image,bars,**kwargs):
-    matriculation_number = 0
-    digits = []
-    area = kwargs.get("area", [-658,-32])
-    offsets = kwargs.get("matriculation_number_offsets", [-594, -522, -449, -377, -305, -233, -161, -89])
-    #add offsets to kwargs if not there
-    if "offsets" not in kwargs:
-        kwargs["offsets"] = offsets
-    
-    for i in range(2,12):
-        line = image[bars[i][0]:bars[i][1],:].copy()
-        answers = get_mark_indexes(line,area=area,**kwargs)
-        for a in answers:
-            matriculation_number += (i-2)*10**(7-a)
-            digits.append(a)
-    print(digits)
-    #turn matriculation number into a 8 digit string with 0 padding as needed
-    for i in range(8):
-        #if i does not appear in digits or it appears more than once, return None as an error
-        if i not in digits or digits.count(i) > 1:
-            return None
-    logging.debug("Matriculation number: "+str(matriculation_number))
-    return str(matriculation_number).zfill(8)
-###############################################################################
-def get_answers(line,**kwargs):
+    #window_size is the size of the window to search for marks
+    #window_height is the height of the window to search for marks
+    #threshold is the threshold for deciding whether a mark is filled or not, expressed as a percentage of the maximum
+    #red_threshold is the threshold for the red channel
+    #Returns an array of answers for the question and an updated right_bar_cache as needed.
+    #We assume that at least one of the answers is not filled in.
     offsets = [[-2397,-2325,-2252,-2180,-2108],
                [-1819,-1747,-1674,-1602,-1530],
                [-1241,-1169,-1096,-1024,-951],
                [-663,-590,-519,-446,-374]]
-    areas = [[-2457,-2048],[-1877,-1470],[-1301,-891],[-723,-314]]
+    
+    window_height = kwargs.get("window_height", 0.8)
+    window_size = kwargs.get("window_size", 60)
+    threshold = kwargs.get("threshold", 0.7)
+    red_threshold = kwargs.get("red_threshold", 200)
+    one_answer_only = kwargs.get("one_answer_only", False)
 
+    #the column we need is question_number//30 and the bar we need is 12+question_number%30
+    line = image[bars[question_number%30+12][0]:bars[question_number%30+12][1],:]
+    if right_bar_cache.get(question_number%30+12,None) is None:
+        right_bar_cache[question_number%30+12] = find_right(line)
+    right = right_bar_cache[question_number%30+12]
+
+    offset = offsets[question_number//30]
+
+    brightness_array = np.zeros([len(offset)])
+    for i in range(len(offset)):
+        window = line[int((1-window_height)*line.shape[0]):int(window_height*line.shape[0]),right+offset[i]-window_size//2:right+offset[i]+window_size//2].copy()
+        window = window[:,:,0] #take only the red channel
+        window = cv2.threshold(window, red_threshold, 255, cv2.THRESH_BINARY)[1]
+        brightness_array[i] = np.sum(window)
+    
+    #print(question_number,brightness_array)
+
+    #if an element in the brhightness array is 10% less than the maximum, we assume it is filled in
     answers = []
-    for a in areas:
-        answers.append(get_mark_indexes(line,area=a,offsets=offsets.pop(0),**kwargs))
+    for i in range(len(brightness_array)):
+        if brightness_array[i] < threshold*np.max(brightness_array):
+            answers.append(i)
 
-    return answers
+    if one_answer_only:
+        #the answer is the index of the least bright element
+        ans = np.argmin(brightness_array)
+        
+        if len(answers) > 1:
+            logging.warning(f"Student has selected more than one answer ({answers}) for question {question_number+1}")
+            logging.warning(f"{brightness_array/np.max(brightness_array)}")
+        answers = [int(ans)]
+        
+    return answers,right_bar_cache
+
 ###############################################################################
+def get_matriculation_number(image,bars,**kwargs):
+    offsets = [-594, -522, -449, -377, -305, -233, -161, -89]
+    window_height = kwargs.get("window_height", 0.8)
+    window_size = kwargs.get("window_size", 60)
+    red_threshold = kwargs.get("red_threshold", 200)
+    brightness_matrix = np.zeros([10,len(offsets)])
+
+    for i in range(2,12):
+        line = image[bars[i][0]:bars[i][1],:]
+        right = find_right(line)
+        for j in range(len(offsets)):
+            window = line[int((1-window_height)*line.shape[0]):int(window_height*line.shape[0]),right+offsets[j]-window_size//2:right+offsets[j]+window_size//2].copy()
+            window = window[:,:,0]
+            window = cv2.threshold(window, red_threshold, 255, cv2.THRESH_BINARY)[1]
+            brightness_matrix[i-2,j] = np.sum(window)
+    
+    matriculation_number = 0
+    #iterate through each column finding the minimum
+    for j in range(len(offsets)):
+        min_index = np.argmin(brightness_matrix[:,j])
+        matriculation_number += (min_index)*10**(7-j)
+        #plt.imshow(image[bars[min_index+2][0]:bars[min_index+2][1],right+offsets[j]-window_size//2:right+offsets[j]+window_size//2])
+        #plt.show()
+    return str(matriculation_number).zfill(8)
+
+
+###############################################################################
+ 
 def get_all_answers(image,bars,**kwargs):
     answer_map = {}
-    
-    for i in range(12,42): 
-        line = image[bars[i][0]:bars[i][1],:].copy()
-        answers = get_answers(line, **kwargs)
-        #answers are for questions (i-11),(i-11)+30,(i-11)+60 and (i-11)+90
-        answer_map[i-11] = answers[0]
-        answer_map[i-11+30] = answers[1]
-        answer_map[i-11+60] = answers[2]
-        answer_map[i-11+90] = answers[3]
-    
+    right_bar_cache = {}
+    for i in range(120):
+        answer_map[i+1] = get_question_answers(image,i,bars,right_bar_cache,**kwargs)
+       
     logging.debug(f"Answer map: {answer_map}")
     
     return answer_map
@@ -276,7 +224,7 @@ def read_image_answers(image,**kwargs):
     if prepared_image is None:
         logging.fatal(f"Unable to read page")
         sys.exit(1)
-    ans = get_all_answers(prepared_image,blackBars)
+    ans = get_all_answers(prepared_image,blackBars,one_answer_only = ONE_ANSWER_ONLY)
 
     matriculation_number = get_matriculation_number(prepared_image,blackBars)
     
