@@ -193,7 +193,7 @@ def get_question_answers(image,question_number,bars,right_bar_cache,**kwargs):
     if mark_image:
         for i in range(len(offset)):
             if i in answers:
-                cv2.rectangle(line,(right+offset[i]-window_size//2,bars[question_number%30+12][0]+int((1-window_height)*line.shape[0])),(right+offset[i]+window_size//2,bars[question_number%30+12][0]+int(window_height*line.shape[0])),(0,0,255),1)
+                cv2.rectangle(image,(right+offset[i]-window_size//2,bars[question_number%30+12][0]+int((1-window_height)*line.shape[0])),(right+offset[i]+window_size//2,bars[question_number%30+12][0]+int(window_height*line.shape[0])),(0,255,0),3)
         
     return answers,right_bar_cache
 
@@ -229,7 +229,7 @@ def get_matriculation_number(image,bars,**kwargs):
             right = find_right(line)
             for j in range(len(offsets)):
                 if brightness_matrix[i-2,j] == np.min(brightness_matrix[:,j]):
-                    cv2.rectangle(line,(right+offsets[j]-window_size//2,bars[i][0]+int((1-window_height)*line.shape[0])),(right+offsets[j]+window_size//2,bars[i][0]+int(window_height*line.shape[0])),(0,0,255),1)
+                    cv2.rectangle(image,(right+offsets[j]-window_size//2,bars[i][0]+int((1-window_height)*line.shape[0])),(right+offsets[j]+window_size//2,bars[i][0]+int(window_height*line.shape[0])),(0,255,0),3)
     return str(matriculation_number).zfill(8)
 
 
