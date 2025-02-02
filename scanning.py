@@ -121,6 +121,7 @@ def get_question_answers(image,question_number,bars,right_bar_cache,**kwargs):
     #window_height is the height of the window to search for marks
     #threshold is the threshold for deciding whether a mark is filled or not, expressed as a percentage of the maximum
     #red_threshold is the threshold for the red channel
+    #mark_image is a boolean indicating whether to write a mark on the image showing where the mark was found
     #Returns an array of answers for the question and an updated right_bar_cache as needed.
     #We assume that at least one of the answers is not filled in.
     offsets = [[-2397,-2325,-2252,-2180,-2108],
@@ -133,6 +134,7 @@ def get_question_answers(image,question_number,bars,right_bar_cache,**kwargs):
     threshold = kwargs.get("threshold", 0.75)
     red_threshold = kwargs.get("red_threshold", 170)
     one_answer_only = kwargs.get("one_answer_only", False)
+    mark_image = kwargs.get("mark_image", False)
 
     #the column we need is question_number//30 and the bar we need is 12+question_number%30
     line = image[bars[question_number%30+12][0]:bars[question_number%30+12][1],:]
@@ -164,8 +166,16 @@ def get_question_answers(image,question_number,bars,right_bar_cache,**kwargs):
         
         if len(answers) > 1:
             logging.warning(f"Student has selected more than one answer ({answers}) for question {question_number+1}")
-            logging.warning(f"{brightness_array/np.max(brightness_array)}")
-        answers = [int(ans)]
+            #logging.warning(f"{brightness_array/np.max(brightness_array)}")
+        if brightness_array[ans] > 0.9*np.max(brightness_array): #N.B. Constant here
+            answers = []
+        else:      
+            answers = [int(ans)]
+    
+    if mark_image:
+        for i in range(len(offset)):
+            if i in answers:
+                cv2.rectangle(line,(right+offset[i]-window_size//2,bars[question_number%30+12][0]+int((1-window_height)*line.shape[0])),(right+offset[i]+window_size//2,bars[question_number%30+12][0]+int(window_height*line.shape[0])),(0,0,255),1)
         
     return answers,right_bar_cache
 
@@ -176,6 +186,7 @@ def get_matriculation_number(image,bars,**kwargs):
     window_size = kwargs.get("window_size", 60)
     red_threshold = kwargs.get("red_threshold", 200)
     brightness_matrix = np.zeros([10,len(offsets)])
+    mark_image = kwargs.get("mark_image", False)
 
     for i in range(2,12):
         line = image[bars[i][0]:bars[i][1],:]
@@ -193,15 +204,27 @@ def get_matriculation_number(image,bars,**kwargs):
         matriculation_number += (min_index)*10**(7-j)
         #plt.imshow(image[bars[min_index+2][0]:bars[min_index+2][1],right+offsets[j]-window_size//2:right+offsets[j]+window_size//2])
         #plt.show()
+
+    if mark_image:
+        for i in range(2,12):
+            line = image[bars[i][0]:bars[i][1],:]
+            right = find_right(line)
+            for j in range(len(offsets)):
+                if brightness_matrix[i-2,j] == np.min(brightness_matrix[:,j]):
+                    cv2.rectangle(line,(right+offsets[j]-window_size//2,bars[i][0]+int((1-window_height)*line.shape[0])),(right+offsets[j]+window_size//2,bars[i][0]+int(window_height*line.shape[0])),(0,0,255),1)
     return str(matriculation_number).zfill(8)
 
 
 ###############################################################################
  
 def get_all_answers(image,bars,**kwargs):
+    num_answers = kwargs.get("num_answers",120)
+    if num_answers == None or num_answers > 120 or num_answers < 1:
+        num_answers = 120
+
     answer_map = {}
     right_bar_cache = {}
-    for i in range(120):
+    for i in range(num_answers):
         answer_map[i+1] = get_question_answers(image,i,bars,right_bar_cache,**kwargs)
        
     logging.debug(f"Answer map: {answer_map}")
