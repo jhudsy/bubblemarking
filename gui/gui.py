@@ -3,7 +3,7 @@
 ################################################################################
 ## Form generated from reading UI file 'gui.ui'
 ##
-## Created by: Qt User Interface Compiler version 6.7.3
+## Created by: Qt User Interface Compiler version 6.8.2
 ##
 ## WARNING! All changes made in this file will be lost when recompiling UI file!
 ################################################################################
@@ -24,12 +24,12 @@ class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
             MainWindow.setObjectName(u"MainWindow")
-        MainWindow.resize(537, 569)
+        MainWindow.resize(554, 716)
         self.centralwidget = QWidget(MainWindow)
         self.centralwidget.setObjectName(u"centralwidget")
         self.layoutWidget = QWidget(self.centralwidget)
         self.layoutWidget.setObjectName(u"layoutWidget")
-        self.layoutWidget.setGeometry(QRect(10, 10, 371, 251))
+        self.layoutWidget.setGeometry(QRect(10, 10, 371, 272))
         self.verticalLayout = QVBoxLayout(self.layoutWidget)
         self.verticalLayout.setObjectName(u"verticalLayout")
         self.verticalLayout.setContentsMargins(0, 0, 0, 0)
@@ -108,6 +108,31 @@ class Ui_MainWindow(object):
 
         self.verticalLayout.addLayout(self.horizontalLayout_3)
 
+        self.SaveImageFileCheckbox = QCheckBox(self.layoutWidget)
+        self.SaveImageFileCheckbox.setObjectName(u"SaveImageFileCheckbox")
+
+        self.verticalLayout.addWidget(self.SaveImageFileCheckbox)
+
+        self.horizontalLayout_4 = QHBoxLayout()
+        self.horizontalLayout_4.setObjectName(u"horizontalLayout_4")
+        self.ImageFileLabel = QLabel(self.layoutWidget)
+        self.ImageFileLabel.setObjectName(u"ImageFileLabel")
+
+        self.horizontalLayout_4.addWidget(self.ImageFileLabel)
+
+        self.ImageFileName = QLineEdit(self.layoutWidget)
+        self.ImageFileName.setObjectName(u"ImageFileName")
+
+        self.horizontalLayout_4.addWidget(self.ImageFileName)
+
+        self.ImageFileSelectButton = QPushButton(self.layoutWidget)
+        self.ImageFileSelectButton.setObjectName(u"ImageFileSelectButton")
+
+        self.horizontalLayout_4.addWidget(self.ImageFileSelectButton)
+
+
+        self.verticalLayout.addLayout(self.horizontalLayout_4)
+
         self.ScanButton = QPushButton(self.layoutWidget)
         self.ScanButton.setObjectName(u"ScanButton")
 
@@ -115,14 +140,14 @@ class Ui_MainWindow(object):
 
         self.OutputTextArea = QTextBrowser(self.centralwidget)
         self.OutputTextArea.setObjectName(u"OutputTextArea")
-        self.OutputTextArea.setGeometry(QRect(10, 270, 521, 221))
+        self.OutputTextArea.setGeometry(QRect(10, 290, 531, 331))
         self.ClearOutputButton = QPushButton(self.centralwidget)
         self.ClearOutputButton.setObjectName(u"ClearOutputButton")
-        self.ClearOutputButton.setGeometry(QRect(10, 500, 111, 26))
+        self.ClearOutputButton.setGeometry(QRect(10, 630, 111, 26))
         MainWindow.setCentralWidget(self.centralwidget)
         self.menubar = QMenuBar(MainWindow)
         self.menubar.setObjectName(u"menubar")
-        self.menubar.setGeometry(QRect(0, 0, 537, 21))
+        self.menubar.setGeometry(QRect(0, 0, 554, 37))
         MainWindow.setMenuBar(self.menubar)
         self.statusbar = QStatusBar(MainWindow)
         self.statusbar.setObjectName(u"statusbar")
@@ -133,6 +158,9 @@ class Ui_MainWindow(object):
         self.AnswerInFileCheckbox.clicked["bool"].connect(self.AnswerFileSelectButton.setDisabled)
         self.ClearOutputButton.clicked.connect(self.OutputTextArea.clear)
         self.AnswerInFileCheckbox.clicked["bool"].connect(self.AnswerFileLabel.setDisabled)
+        self.SaveImageFileCheckbox.clicked["bool"].connect(self.ImageFileLabel.setDisabled)
+        self.SaveImageFileCheckbox.clicked["bool"].connect(self.ImageFileName.setDisabled)
+        self.SaveImageFileCheckbox.clicked["bool"].connect(self.ImageFileSelectButton.setDisabled)
 
         QMetaObject.connectSlotsByName(MainWindow)
     # setupUi
@@ -147,6 +175,9 @@ class Ui_MainWindow(object):
         self.AnswerFileSelectButton.setText(QCoreApplication.translate("MainWindow", u"Select", None))
         self.OutputFileLabel.setText(QCoreApplication.translate("MainWindow", u"Output file", None))
         self.OutputFileSelectButton.setText(QCoreApplication.translate("MainWindow", u"Select", None))
+        self.SaveImageFileCheckbox.setText(QCoreApplication.translate("MainWindow", u"Save image processed file", None))
+        self.ImageFileLabel.setText(QCoreApplication.translate("MainWindow", u"Image file", None))
+        self.ImageFileSelectButton.setText(QCoreApplication.translate("MainWindow", u"Select", None))
         self.ScanButton.setText(QCoreApplication.translate("MainWindow", u"Scan", None))
         self.ClearOutputButton.setText(QCoreApplication.translate("MainWindow", u"Clear output box", None))
     # retranslateUi

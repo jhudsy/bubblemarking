@@ -24,8 +24,10 @@ class AppMainWindow(Ui_MainWindow):
         self.ScanFileSelectButton.clicked.connect(self.select_scan_file)
         self.AnswerFileSelectButton.clicked.connect(self.select_answer_file)
         self.OutputFileSelectButton.clicked.connect(self.select_output_file)
+        self.ImageFileSelectButton.clicked.connect(self.select_image_file)
 
         self.OutputFileName.setText("output.csv")
+        self.ImageFileName.setText("output.pdf")
 
         self.ScanButton.clicked.connect(self.run_scan)
 
@@ -51,6 +53,10 @@ class AppMainWindow(Ui_MainWindow):
     def select_output_file(self):
         file = QtWidgets.QFileDialog.getSaveFileName()[0]
         self.OutputFileName.setText(file)
+    
+    def select_image_file(self):
+        file = QtWidgets.QFileDialog.getSaveFileName(filter="PDF files (*.pdf)")[0]
+        self.ImageFileName.setText(file)
 
     def run_scan(self):
         scan_file = self.ScanFileName.text()
@@ -58,6 +64,13 @@ class AppMainWindow(Ui_MainWindow):
         output_file = self.OutputFileName.text()
         one_answer_only = self.OneAnswerCheckbox.isChecked()
         answer_in_file = self.AnswerInFileCheckbox.isChecked()
+        write_image_file = self.SaveImageFileCheckbox.isChecked()
+        pdf = None
+
+        if write_image_file:
+            #create a pdf file to store the images
+            pdf = scanning.create_pdf()
+        
         num_questions = None
 
         answers_df = None
@@ -86,7 +99,12 @@ class AppMainWindow(Ui_MainWindow):
 
         #read the answers from the scanned image noting any issues.    
         for i in range(num_pages):
-            df = scanning.read_image_answers(scanning.get_image_from_file(doc,i),one_answer_only=one_answer_only,num_questions=num_questions)
+            image = scanning.get_image_from_file(doc,i)
+            df = scanning.read_image_answers(image,one_answer_only=one_answer_only,num_questions=num_questions,mark_image=True if pdf is not None else False)
+
+            if pdf is not None:
+                scanning.add_image_to_pdf(pdf,image)
+
             if df["Matriculation number"].values[0] == "99999999":
                 logging.warning("Unable to read matriculation number on page "+str(i)+". Assigning matriculation number "+str(unknown_matriculation_number))
                 df["Matriculation number"] = unknown_matriculation_number
@@ -114,6 +132,11 @@ class AppMainWindow(Ui_MainWindow):
 
         output_df.to_csv(output_file,index=False)
         logging.info("Output file written to ",output_file)
+
+        if pdf is not None:
+            scanning.save_pdf(pdf,self.ImageFileName.text())
+        
+        
 
 def main():
     app = QtWidgets.QApplication(sys.argv)

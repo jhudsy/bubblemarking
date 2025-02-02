@@ -31,6 +31,24 @@ def get_image_from_file(doc,page_number,**kwargs):
     return image
 
 ###############################################################################
+def create_pdf():
+    return pdfium.PdfDocument.new()
+###############################################################################
+def write_image_to_pdf(pdf,image):
+    image = pdfium.PdfImage.new(pdf)
+    width,height = image.set_from_array(image)
+    matrix = pdfium.PdfMatrix.scale(width,height)
+    image.set_matrix(matrix)
+
+    page = pdf.new_page(width,height)
+    page.insert_obj(image)
+    page.gen_content()
+###############################################################################
+def save_pdf(pdf,file_name):
+    pdf.save(file_name,version=17)
+
+###############################################################################
+
 def straighten_image(original_image,**kwargs):
     threshold = kwargs.get("threshold", 40)
     image_percent = kwargs.get("image_percent", 0.05)
@@ -251,14 +269,15 @@ def answers_to_string(answers):
 def read_image_answers(image,**kwargs):
     one_answer_only = kwargs.get("one_answer_only",False)
     num_questions = kwargs.get("num_questions",120)
+    mark_image = kwargs.get("mark_image",False)
     df = pd.DataFrame(columns=["Matriculation number","Question","Answer"]) #stores student answers
     prepared_image, blackBars = prepare_image(image)
     if prepared_image is None:
         logging.fatal(f"Unable to read page")
         sys.exit(1)
-    ans = get_all_answers(prepared_image,blackBars,one_answer_only = one_answer_only,num_questions=num_questions)
+    ans = get_all_answers(prepared_image,blackBars,one_answer_only = one_answer_only,num_questions=num_questions,mark_image=mark_image)
 
-    matriculation_number = get_matriculation_number(prepared_image,blackBars)
+    matriculation_number = get_matriculation_number(prepared_image,blackBars,mark_image = mark_image)
     
     if matriculation_number is None:
             matriculation_number = "99999999"
