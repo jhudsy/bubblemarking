@@ -58,6 +58,16 @@ class AppMainWindow(Ui_MainWindow):
         output_file = self.OutputFileName.text()
         one_answer_only = self.OneAnswerCheckbox.isChecked()
         answer_in_file = self.AnswerInFileCheckbox.isChecked()
+        num_questions = None
+
+        answers_df = None
+        if not answer_in_file: #if answers ARE in a separate file then we read it now to get the number of questions
+            try:
+                answers_df = dataframes.read_answers_from_file(answer_file)
+                num_questions = len(answers_df)
+            except FileNotFoundError:
+                QtWidgets.QMessageBox.warning(self.ScanButton, "Error", "Unable to open answer file")
+                return
 
         doc = None
         try:
@@ -76,13 +86,15 @@ class AppMainWindow(Ui_MainWindow):
 
         #read the answers from the scanned image noting any issues.    
         for i in range(num_pages):
-            df = scanning.read_image_answers(scanning.get_image_from_file(doc,i),ONE_ANSWER_ONLY=one_answer_only)
+            df = scanning.read_image_answers(scanning.get_image_from_file(doc,i),one_answer_only=one_answer_only,num_questions=num_questions)
             if df["Matriculation number"].values[0] == "99999999":
                 logging.warning("Unable to read matriculation number on page "+str(i)+". Assigning matriculation number "+str(unknown_matriculation_number))
                 df["Matriculation number"] = unknown_matriculation_number
                 unknown_matriculation_number -= 1
             else:
                 logging.info("Read matriculation number "+str(df["Matriculation number"].values[0])+" on page "+str(i))
+            if df["Matriculation number"].values[0] == "00000000": #if the matriculation number is 0000000 then it is the model answers and we can work out how many questions there are
+                num_questions = len(df)
         
         if df["Matriculation number"].values[0] in student_answer_df["Matriculation number"].values:
             logging.warning("Duplicate matriculation number "+str(df["Matriculation number"].values[0])+" on page "+str(i)+"setting to"+str(unknown_matriculation_number))
@@ -90,15 +102,8 @@ class AppMainWindow(Ui_MainWindow):
             unknown_matriculation_number -= 1 
             
         student_answer_df = pd.concat([student_answer_df,df],ignore_index=True)
-
-        answers_df = None
-        if not answer_in_file:
-            try:
-                answers_df = dataframes.read_answers_from_file(answer_file)
-            except FileNotFoundError:
-                QtWidgets.QMessageBox.warning(self.ScanButton, "Error", "Unable to open answer file")
-                return
-        else:
+        
+        if answer_in_file: #if the answers ARE NOT in a separate file then we read them now
             answers_df = dataframes.read_answers_from_df(student_answer_df)
         
         if answers_df == None:

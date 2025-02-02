@@ -22,6 +22,13 @@ def main():
     READ_ANSWERS_FROM_FILE = args.read_answers_from_file
     ONE_ANSWER_ONLY = args.one_answer_only
 
+    num_questions = None
+
+    answer_df = None
+    if READ_ANSWERS_FROM_FILE is not None:
+        answers_df = read_answers_from_file(READ_ANSWERS_FROM_FILE)
+        num_questions = len(answers_df)
+
     doc = get_file(FILE)
     num_pages = get_number_of_pages(doc)
     logging.info(f"Number of pages in document: {num_pages}")
@@ -32,13 +39,15 @@ def main():
 
     #read the answers from the scanned image noting any issues.    
     for i in range(num_pages):
-        df = read_image_answers(get_image_from_file(doc,i),ONE_ANSWER_ONLY=ONE_ANSWER_ONLY)
+        df = read_image_answers(get_image_from_file(doc,i),one_answer_only=ONE_ANSWER_ONLY,num_questions=num_questions)
         if df["Matriculation number"].values[0] == "99999999":
             logging.warning(f"Unable to read matriculation number on page {i}. Assigning matriculation number {unknown_matriculation_number}")
             df["Matriculation number"] = unknown_matriculation_number
             unknown_matriculation_number -= 1
         else:
             logging.info(f"Read matriculation number {df['Matriculation number'].values[0]} on page {i}")
+        if df["Matriculation number"].values[0] == "00000000": #if the matriculation number is 0000000 then it is the model answers and we can work out how many questions there are
+                num_questions = len(df)
         
         #check if matriculation number already exists in student_answer_df
         if df["Matriculation number"].values[0] in student_answer_df["Matriculation number"].values:
@@ -49,10 +58,9 @@ def main():
         student_answer_df = pd.concat([student_answer_df,df],ignore_index=True)
                 
     #read the answers from the answer file or from student_answer_df        
-    answers_df = None
-    if READ_ANSWERS_FROM_FILE is not None:
-        answers_df = read_answers_from_file(READ_ANSWERS_FROM_FILE)
-    else:
+    
+    
+    if READ_ANSWERS_FROM_FILE is None:
         answers_df = read_answers_from_df(student_answer_df)
         
     #compute marks

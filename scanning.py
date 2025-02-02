@@ -218,14 +218,21 @@ def get_matriculation_number(image,bars,**kwargs):
 ###############################################################################
  
 def get_all_answers(image,bars,**kwargs):
-    num_answers = kwargs.get("num_answers",120)
-    if num_answers == None or num_answers > 120 or num_answers < 1:
-        num_answers = 120
+    num_questions = kwargs.get("num_questions",120)
+    if num_questions == None or num_questions > 120 or num_questions < 1:
+        num_questions = 120
 
     answer_map = {}
     right_bar_cache = {}
-    for i in range(num_answers):
+    for i in range(num_questions):
         answer_map[i+1] = get_question_answers(image,i,bars,right_bar_cache,**kwargs)
+    
+    #work backwards removing any elements from answermap for which the answer is [] until we reach an element for which the answer is not []
+    for i in range(num_questions-1,-1,-1):
+        if len(answer_map[i+1]) == 0:
+            del answer_map[i+1]
+        else:
+            break
        
     logging.debug(f"Answer map: {answer_map}")
     
@@ -242,13 +249,14 @@ def answers_to_string(answers):
     return answer_string[:-1]
 ###############################################################################
 def read_image_answers(image,**kwargs):
-    ONE_ANSWER_ONLY = kwargs.get("ONE_ANSWER_ONLY",False)
+    one_answer_only = kwargs.get("one_answer_only",False)
+    num_questions = kwargs.get("num_questions",120)
     df = pd.DataFrame(columns=["Matriculation number","Question","Answer"]) #stores student answers
     prepared_image, blackBars = prepare_image(image)
     if prepared_image is None:
         logging.fatal(f"Unable to read page")
         sys.exit(1)
-    ans = get_all_answers(prepared_image,blackBars,one_answer_only = ONE_ANSWER_ONLY)
+    ans = get_all_answers(prepared_image,blackBars,one_answer_only = one_answer_only,num_questions=num_questions)
 
     matriculation_number = get_matriculation_number(prepared_image,blackBars)
     
@@ -256,7 +264,7 @@ def read_image_answers(image,**kwargs):
             matriculation_number = "99999999"
 
     for j in ans:
-        if ONE_ANSWER_ONLY and len(ans[j])>1:
+        if one_answer_only and len(ans[j])>1:
             logging.warning(f"Student {matriculation_number} has selected more than one answer for question {j}")
         df = pd.concat([df,pd.DataFrame({
             "Matriculation number":[matriculation_number],
