@@ -29,6 +29,10 @@ def  compute_mark(answer,correct_answer):
     if len(answer) == 0: #handle the case where the student has not answered the question
         return 0,0
     
+    #remove all spaces from answer and correct_answer
+    answer = answer.replace(" ","")
+    correct_answer = correct_answer.replace(" ","")
+
     answer = answer.split(",")
     correct_answer = correct_answer.split(",")
 

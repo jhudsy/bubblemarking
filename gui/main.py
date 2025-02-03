@@ -122,6 +122,8 @@ class AppMainWindow(Ui_MainWindow):
                     if len(df[df["Question"]==i]["Answer"].values[0]) == 0:
                         break
                 num_questions = i-1
+                #remove extra questions from the df
+                df = df[df["Question"]<=num_questions]
         
             if df["Matriculation number"].values[0] in student_answer_df["Matriculation number"].values:
                 logging.warning("Duplicate matriculation number "+str(df["Matriculation number"].values[0])+" on page "+str(i+1)+"setting to"+str(unknown_matriculation_number))
