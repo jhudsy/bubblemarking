@@ -95,7 +95,7 @@ def find_black_bars(orig_image, **kwargs):
             top = i
         if thresh[i,int(-width*right_scan_percent)] == 255 and foundTop:
             foundTop = False
-            blackBars.append((top-2, i+8)) #enlarge the area a bit.
+            blackBars.append((top-1, i+7)) #enlarge the area a bit.
     
     if len(blackBars) != num_black_Bars: 
         return None
@@ -121,8 +121,8 @@ def find_right(line):
     #invert image
     line = cv2.bitwise_not(line)
     count = 0
-    for i in range(line.shape[1]-1,0,-1):
-        if np.sum(line[5:25,i]) > 4000:
+    for i in range(line.shape[1]-1,0,-1): #we are looking where the black bar ends by summing up the white pixels
+        if np.sum(line[5:25,i]) > 4000: #N.B. Constant here
             count += 1
         elif count<60: #N.B. Constant here
             count = 0
@@ -153,7 +153,7 @@ def get_question_answers(image,question_number,bars,right_bar_cache,**kwargs):
     
     window_height = kwargs.get("window_height", 1)
     window_size = kwargs.get("window_size", 58)
-    threshold = kwargs.get("threshold", 0.75)
+    threshold = kwargs.get("threshold", 0.8)
     red_threshold = kwargs.get("red_threshold", 170)
     one_answer_only = kwargs.get("one_answer_only", False)
     mark_image = kwargs.get("mark_image", False)
