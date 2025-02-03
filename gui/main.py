@@ -145,7 +145,10 @@ class AppMainWindow(Ui_MainWindow):
         logging.info(f"Output file written to {output_file}")
 
         if pdf is not None:
+            logging.info(f"Writing pdf file")
             scanning.save_pdf(pdf,self.ImageFileName.text())
+        
+        logging.info("Scanning complete")
         
         
 
