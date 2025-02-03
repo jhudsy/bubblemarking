@@ -174,8 +174,6 @@ def get_question_answers(image,question_number,bars,right_bar_cache,**kwargs):
         window=cv2.erode(window,np.ones([3,3]),iterations=2)
         brightness_array[i] = np.sum(window)
     
-    #print(question_number,brightness_array)
-
     #if an element in the brhightness array is 10% less than the maximum, we assume it is filled in
     answers = []
     for i in range(len(brightness_array)):

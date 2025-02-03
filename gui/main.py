@@ -6,7 +6,7 @@ import sys
 import bubblemarking.scanning as scanning
 import bubblemarking.dataframes as dataframes
 import logging
-
+import threading
 
 
 class WriteLogToWidgetHandler(logging.Handler):
@@ -59,6 +59,10 @@ class AppMainWindow(Ui_MainWindow):
         self.ImageFileName.setText(file)
 
     def run_scan(self):
+        thread = threading.Thread(target=self._run_scan)
+        thread.start()
+
+    def _run_scan(self):
         scan_file = self.ScanFileName.text()
         answer_file = self.AnswerFileName.text()
         output_file = self.OutputFileName.text()
@@ -100,6 +104,7 @@ class AppMainWindow(Ui_MainWindow):
         #read the answers from the scanned image noting any issues.    
         for i in range(num_pages):
             image = scanning.get_image_from_file(doc,i)
+
             df,image = scanning.read_image_answers(image,one_answer_only=one_answer_only,num_questions=num_questions,mark_image=True if pdf is not None else False)
 
             if pdf is not None:
