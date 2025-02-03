@@ -96,7 +96,7 @@ class AppMainWindow(Ui_MainWindow):
         num_pages = scanning.get_number_of_pages(doc)
         logging.info(f"Number of pages in document: {num_pages}")
 
-        self.OutputTextArea.append("Scan complete")
+        self.OutputTextArea.append("Loaded Scan")
         student_answer_df = pd.DataFrame(columns=["Matriculation number","Question","Answer"]) #stores student answers
 
         unknown_matriculation_number = 99999999 #unknown matriculation number counter
@@ -111,11 +111,11 @@ class AppMainWindow(Ui_MainWindow):
                 scanning.add_image_to_pdf(pdf,image)
 
             if df["Matriculation number"].values[0] == "99999999":
-                logging.warning("Unable to read matriculation number on page "+str(i)+". Assigning matriculation number "+str(unknown_matriculation_number))
+                logging.warning("Unable to read matriculation number on page "+str(i+1)+". Assigning matriculation number "+str(unknown_matriculation_number))
                 df["Matriculation number"] = unknown_matriculation_number
                 unknown_matriculation_number -= 1
             else:
-                logging.info("Read matriculation number "+str(df["Matriculation number"].values[0])+" on page "+str(i))
+                logging.info("Read matriculation number "+str(df["Matriculation number"].values[0])+" on page "+str(i+1))
             if df["Matriculation number"].values[0] == "00000000": #if the matriculation number is 0000000 then it is the model answers and we can work out how many questions there are.
                 for i in range(1,121):
                     #check the content of df["Question","Answer",] os not empty
@@ -124,7 +124,7 @@ class AppMainWindow(Ui_MainWindow):
                 num_questions = i-1
         
             if df["Matriculation number"].values[0] in student_answer_df["Matriculation number"].values:
-                logging.warning("Duplicate matriculation number "+str(df["Matriculation number"].values[0])+" on page "+str(i)+"setting to"+str(unknown_matriculation_number))
+                logging.warning("Duplicate matriculation number "+str(df["Matriculation number"].values[0])+" on page "+str(i+1)+"setting to"+str(unknown_matriculation_number))
                 df["Matriculation number"] = unknown_matriculation_number
                 unknown_matriculation_number -= 1 
             

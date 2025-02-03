@@ -95,7 +95,7 @@ def find_black_bars(orig_image, **kwargs):
             top = i
         if thresh[i,int(-width*right_scan_percent)] == 255 and foundTop:
             foundTop = False
-            blackBars.append((top, i))
+            blackBars.append((top-2, i+8)) #enlarge the area a bit.
     
     if len(blackBars) != num_black_Bars: 
         return None
