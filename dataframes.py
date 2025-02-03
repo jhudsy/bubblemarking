@@ -10,7 +10,8 @@ def read_answers_from_file(filename):
     return answers_df
 ###############################################################################
 def read_answers_from_df(df,**kwargs):
-    matriculation_number = kwargs.get("matriculation_number", "0000000")
+    
+    matriculation_number = kwargs.get("matriculation_number", "00000000")
     answers_df = df[df["Matriculation number"]==matriculation_number]
     answers_df = answers_df.drop(columns=["Matriculation number"])
     #remove the row with matriculation number 0000000 from student_answer_df
@@ -57,7 +58,7 @@ def compute_marks(student_answer_df,answers_df):
 def make_output_df(student_answer_df,answers_df):
     #create an output df with the columns Matriculation number, Question1, ..., QuestionN where N is the number of questions. The first row will have matriculation number 0000000 and the total number of correct answers for each question. E.g., if question 3 had 5 correct answers, the cell for question 3 will contain 5. We also have Question1Answer, ..., QuestionNAnswer where the first row will contain the correct answers for each question. E.g., if question 3 had answers A,B,C by the student the cell for Question3Answer will contain "A,B,C"
     output_df = pd.DataFrame(columns=["Matriculation number"])
-    output_df["Matriculation number"] = ["0000000"]
+    output_df["Matriculation number"] = ["00000000"]
     #compute total number of questions by looking at answers
     total_questions = len(answers_df)
     #add columns for each question and the number of correct answers and the correct answers using the answer_df dataframe
@@ -65,6 +66,7 @@ def make_output_df(student_answer_df,answers_df):
         output_df["Question"+str(i)+"NumCorrect"] = len(answers_df[answers_df["Question"]==i]["Answer"].values[0].split(","))
         output_df["Question"+str(i)+"NumIncorrect"] = 0
         output_df["Question"+str(i)+"Answer"] = answers_df[answers_df["Question"]==i]["Answer"].values[0]
+        output_df = output_df.copy() #try defragment the df.
 
     #now fill in the student answers into output_df
     for i in range(len(student_answer_df)):
