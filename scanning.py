@@ -4,6 +4,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import sys
 import argparse
+from PIL import Image
+from pypdfium2 import PdfBitmap
+
 
 import scipy.signal
 import pandas as pd
@@ -34,14 +37,15 @@ def get_image_from_file(doc,page_number,**kwargs):
 def create_pdf():
     return pdfium.PdfDocument.new()
 ###############################################################################
-def write_image_to_pdf(pdf,image):
-    image = pdfium.PdfImage.new(pdf)
-    width,height = image.set_from_array(image)
-    matrix = pdfium.PdfMatrix.scale(width,height)
-    image.set_matrix(matrix)
+def add_image_to_pdf(pdf,image):
+    pdfimage = pdfium.PdfImage.new(pdf)
+    pdfimage.set_bitmap(PdfBitmap.from_pil(Image.fromarray(image)))
+    width,height = pdfimage.get_size()
+    matrix = pdfium.PdfMatrix().scale(width,height)
+    pdfimage.set_matrix(matrix)
 
     page = pdf.new_page(width,height)
-    page.insert_obj(image)
+    page.insert_obj(pdfimage)
     page.gen_content()
 ###############################################################################
 def save_pdf(pdf,file_name):
@@ -194,6 +198,10 @@ def get_question_answers(image,question_number,bars,right_bar_cache,**kwargs):
         for i in range(len(offset)):
             if i in answers:
                 cv2.rectangle(image,(right+offset[i]-window_size//2,bars[question_number%30+12][0]+int((1-window_height)*line.shape[0])),(right+offset[i]+window_size//2,bars[question_number%30+12][0]+int(window_height*line.shape[0])),(0,255,0),3)
+        if len(answers)==0:
+            #draw a red rectangle across whole line
+            cv2.rectangle(image,(right+offset[0]-window_size//2,bars[question_number%30+12][0]),(right+offset[-1]+window_size//2,bars[question_number%30+12][1]),(0,0,255),3)
+            
         
     return answers,right_bar_cache
 
@@ -243,22 +251,16 @@ def get_all_answers(image,bars,**kwargs):
     answer_map = {}
     right_bar_cache = {}
     for i in range(num_questions):
-        answer_map[i+1] = get_question_answers(image,i,bars,right_bar_cache,**kwargs)
-    
-    #work backwards removing any elements from answermap for which the answer is [] until we reach an element for which the answer is not []
-    for i in range(num_questions-1,-1,-1):
-        if len(answer_map[i+1]) == 0:
-            del answer_map[i+1]
-        else:
-            break
+        answer_map[i+1],right_bar_cache = get_question_answers(image,i,bars,right_bar_cache,**kwargs)
        
-    logging.debug(f"Answer map: {answer_map}")
+    #logging.debug(f"Answer map: {answer_map}")
     
     return answer_map
 ###############################################################################
 def answers_to_string(answers):
     #answers is an array containing e.g. [0,2,4] which means the student has selected answers A,C,E
     #we return a string "A,C,E"
+    
     if len(answers) == 0:
         return ""
     answer_string = ""
@@ -290,7 +292,7 @@ def read_image_answers(image,**kwargs):
                 "Question":[j],
                 "Answer":[answers_to_string(ans[j])]
             })],ignore_index=True)
-    return df
+    return df,prepared_image
 ###############################################################################
 
 

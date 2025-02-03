@@ -110,6 +110,7 @@ class Ui_MainWindow(object):
 
         self.SaveImageFileCheckbox = QCheckBox(self.layoutWidget)
         self.SaveImageFileCheckbox.setObjectName(u"SaveImageFileCheckbox")
+        self.SaveImageFileCheckbox.setChecked(True)
 
         self.verticalLayout.addWidget(self.SaveImageFileCheckbox)
 
@@ -158,9 +159,9 @@ class Ui_MainWindow(object):
         self.AnswerInFileCheckbox.clicked["bool"].connect(self.AnswerFileSelectButton.setDisabled)
         self.ClearOutputButton.clicked.connect(self.OutputTextArea.clear)
         self.AnswerInFileCheckbox.clicked["bool"].connect(self.AnswerFileLabel.setDisabled)
-        self.SaveImageFileCheckbox.clicked["bool"].connect(self.ImageFileLabel.setDisabled)
-        self.SaveImageFileCheckbox.clicked["bool"].connect(self.ImageFileName.setDisabled)
-        self.SaveImageFileCheckbox.clicked["bool"].connect(self.ImageFileSelectButton.setDisabled)
+        self.SaveImageFileCheckbox.clicked["bool"].connect(self.ImageFileLabel.setEnabled)
+        self.SaveImageFileCheckbox.clicked["bool"].connect(self.ImageFileName.setEnabled)
+        self.SaveImageFileCheckbox.clicked["bool"].connect(self.ImageFileSelectButton.setEnabled)
 
         QMetaObject.connectSlotsByName(MainWindow)
     # setupUi

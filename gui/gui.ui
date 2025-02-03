@@ -122,6 +122,9 @@
        <property name="text">
         <string>Save image processed file</string>
        </property>
+       <property name="checked">
+        <bool>true</bool>
+       </property>
       </widget>
      </item>
      <item>
@@ -260,7 +263,7 @@
    <sender>SaveImageFileCheckbox</sender>
    <signal>clicked(bool)</signal>
    <receiver>ImageFileLabel</receiver>
-   <slot>setDisabled(bool)</slot>
+   <slot>setEnabled(bool)</slot>
    <hints>
     <hint type="sourcelabel">
      <x>195</x>
@@ -276,7 +279,7 @@
    <sender>SaveImageFileCheckbox</sender>
    <signal>clicked(bool)</signal>
    <receiver>ImageFileName</receiver>
-   <slot>setDisabled(bool)</slot>
+   <slot>setEnabled(bool)</slot>
    <hints>
     <hint type="sourcelabel">
      <x>195</x>
@@ -292,7 +295,7 @@
    <sender>SaveImageFileCheckbox</sender>
    <signal>clicked(bool)</signal>
    <receiver>ImageFileSelectButton</receiver>
-   <slot>setDisabled(bool)</slot>
+   <slot>setEnabled(bool)</slot>
    <hints>
     <hint type="sourcelabel">
      <x>195</x>

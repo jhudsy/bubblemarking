@@ -73,7 +73,7 @@ class AppMainWindow(Ui_MainWindow):
         
         num_questions = None
 
-        answers_df = None
+        answers_df = pd.DataFrame()
         if not answer_in_file: #if answers ARE in a separate file then we read it now to get the number of questions
             try:
                 answers_df = dataframes.read_answers_from_file(answer_file)
@@ -100,7 +100,7 @@ class AppMainWindow(Ui_MainWindow):
         #read the answers from the scanned image noting any issues.    
         for i in range(num_pages):
             image = scanning.get_image_from_file(doc,i)
-            df = scanning.read_image_answers(image,one_answer_only=one_answer_only,num_questions=num_questions,mark_image=True if pdf is not None else False)
+            df,image = scanning.read_image_answers(image,one_answer_only=one_answer_only,num_questions=num_questions,mark_image=True if pdf is not None else False)
 
             if pdf is not None:
                 scanning.add_image_to_pdf(pdf,image)
@@ -111,27 +111,31 @@ class AppMainWindow(Ui_MainWindow):
                 unknown_matriculation_number -= 1
             else:
                 logging.info("Read matriculation number "+str(df["Matriculation number"].values[0])+" on page "+str(i))
-            if df["Matriculation number"].values[0] == "00000000": #if the matriculation number is 0000000 then it is the model answers and we can work out how many questions there are
-                num_questions = len(df)
+            if df["Matriculation number"].values[0] == "00000000": #if the matriculation number is 0000000 then it is the model answers and we can work out how many questions there are.
+                for i in range(1,121):
+                    #check the content of df["Question","Answer",] os not empty
+                    if len(df[df["Question"]==i]["Answer"].values[0]) == 0:
+                        break
+                num_questions = i-1
         
-        if df["Matriculation number"].values[0] in student_answer_df["Matriculation number"].values:
-            logging.warning("Duplicate matriculation number "+str(df["Matriculation number"].values[0])+" on page "+str(i)+"setting to"+str(unknown_matriculation_number))
-            df["Matriculation number"] = unknown_matriculation_number
-            unknown_matriculation_number -= 1 
+            if df["Matriculation number"].values[0] in student_answer_df["Matriculation number"].values:
+                logging.warning("Duplicate matriculation number "+str(df["Matriculation number"].values[0])+" on page "+str(i)+"setting to"+str(unknown_matriculation_number))
+                df["Matriculation number"] = unknown_matriculation_number
+                unknown_matriculation_number -= 1 
             
-        student_answer_df = pd.concat([student_answer_df,df],ignore_index=True)
+            student_answer_df = pd.concat([df,student_answer_df],ignore_index=True)
         
         if answer_in_file: #if the answers ARE NOT in a separate file then we read them now
             answers_df = dataframes.read_answers_from_df(student_answer_df)
         
-        if answers_df == None:
+        if answers_df.empty:
             QtWidgets.QMessageBox.warning(self.ScanButton, "Error", "Unable to read answer file")
         
         student_answer_df = dataframes.compute_marks(student_answer_df,answers_df)
         output_df = dataframes.make_output_df(student_answer_df,answers_df)
 
         output_df.to_csv(output_file,index=False)
-        logging.info("Output file written to ",output_file)
+        logging.info(f"Output file written to {output_file}")
 
         if pdf is not None:
             scanning.save_pdf(pdf,self.ImageFileName.text())
