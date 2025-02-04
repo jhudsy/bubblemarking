@@ -79,7 +79,7 @@ def straighten_image(original_image,**kwargs):
 def find_black_bars(orig_image, **kwargs):
     
     threshold = kwargs.get("threshold", 127)
-    right_scan_percent = kwargs.get("right_scan_percent", 0.02) 
+    right_scan_percent = kwargs.get("right_scan_percent", 0.005) 
     num_black_Bars = kwargs.get("num_black_Bars", 44)
     min_bar_height = kwargs.get("min_bar_height", 20) #minimum height of a black bar, else we ignore it.
     width = orig_image.shape[1]
@@ -89,25 +89,53 @@ def find_black_bars(orig_image, **kwargs):
 
     _, thresh = cv2.threshold(image, threshold, 255, cv2.THRESH_BINARY)
 
+    #to make it more robust we scan from right to left until we actually find some black bars.
+    black_bars_found = False
+    #print("thresh:",orig_image.shape[0]*255-num_black_Bars*min_bar_height*255)
+    x = int(width-width*right_scan_percent)
+    while not black_bars_found and x > 0:
+        #print(x,np.sum(thresh[:,x]))
+        if np.sum(thresh[:,x]) < orig_image.shape[0]*255 - num_black_Bars*min_bar_height*255:
+            black_bars_found = True
+        x -= 1
+    
+    start = x
+
+    while np.sum(thresh[:,x]) < orig_image.shape[0]*255 - num_black_Bars*min_bar_height*255:
+        x-=1
+    
+    end = x
+    #print(f"Start: {start}, End: {end}")    
+    mid = (start+end)//2
+    #right_scan_percent = int((width-(start+end/2))/width)
+    #print(f"Right scan percent: {right_scan_percent}")
+    #cv2.line(thresh,(mid,0),(mid,thresh.shape[0]),(0,0,0),5)
+    #
+    #plt.imshow(thresh,cmap="gray")
+    #plt.show()
+
     blackBars = []
     foundTop = False
     cur_height = 0
     for i in range(0,thresh.shape[0]):
         #print(thresh[i,int(-width*right_scan_percent)])
-        if thresh[i,int(-width*right_scan_percent)] == 0 and not foundTop: 
+        #if thresh[i,int(-width*right_scan_percent)] == 0 and not foundTop: 
+        if thresh[i,mid] == 0 and not foundTop: 
             foundTop = True
             top = i
             cur_height = 0       
-        elif thresh[i,int(-width*right_scan_percent)] == 0 and foundTop:
+        #elif thresh[i,int(-width*right_scan_percent)] == 0 and foundTop:
+        elif thresh[i,mid] == 0 and foundTop:
             cur_height += 1
-        if thresh[i,int(-width*right_scan_percent)] == 255 and foundTop:
+        #if thresh[i,int(-width*right_scan_percent)] == 255 and foundTop:
+        if thresh[i,mid] == 255 and foundTop:
             foundTop = False
             if cur_height > min_bar_height:
                 blackBars.append((top-1, i+7)) #enlarge the area a bit.
                 #cur_height = 0
                 #print(blackBars[-1])
         
-    #cv2.line(thresh,(int(width-width*right_scan_percent),0),(int(width-width*right_scan_percent),thresh.shape[0]),(0,0,0),3)
+    #cv2.line(thresh,(mid,0),(mid,thresh.shape[0]),(0,0,0),3)
     #plt.imshow(thresh,cmap="gray")
     #plt.show()
 
