@@ -1,6 +1,6 @@
 import cv2
 import pypdfium2 as pdfium
-#import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt
 import numpy as np
 import sys
 import argparse
@@ -79,9 +79,11 @@ def straighten_image(original_image,**kwargs):
 def find_black_bars(orig_image, **kwargs):
     
     threshold = kwargs.get("threshold", 127)
-    right_scan_percent = kwargs.get("right_scan_percent", 0.03) 
+    right_scan_percent = kwargs.get("right_scan_percent", 0.02) 
     num_black_Bars = kwargs.get("num_black_Bars", 44)
+    min_bar_height = kwargs.get("min_bar_height", 20) #minimum height of a black bar, else we ignore it.
     width = orig_image.shape[1]
+
 
     image = cv2.cvtColor(orig_image, cv2.COLOR_BGR2GRAY)
 
@@ -89,14 +91,26 @@ def find_black_bars(orig_image, **kwargs):
 
     blackBars = []
     foundTop = False
+    cur_height = 0
     for i in range(0,thresh.shape[0]):
-        if thresh[i,int(-width*right_scan_percent)] == 0 and not foundTop: #N.B., 3% here
+        #print(thresh[i,int(-width*right_scan_percent)])
+        if thresh[i,int(-width*right_scan_percent)] == 0 and not foundTop: 
             foundTop = True
             top = i
+            cur_height = 0       
+        elif thresh[i,int(-width*right_scan_percent)] == 0 and foundTop:
+            cur_height += 1
         if thresh[i,int(-width*right_scan_percent)] == 255 and foundTop:
             foundTop = False
-            blackBars.append((top-1, i+7)) #enlarge the area a bit.
-    
+            if cur_height > min_bar_height:
+                blackBars.append((top-1, i+7)) #enlarge the area a bit.
+                #cur_height = 0
+                #print(blackBars[-1])
+        
+    #cv2.line(thresh,(int(width-width*right_scan_percent),0),(int(width-width*right_scan_percent),thresh.shape[0]),(0,0,0),3)
+    #plt.imshow(thresh,cmap="gray")
+    #plt.show()
+
     if len(blackBars) != num_black_Bars: 
         return None
     return blackBars
