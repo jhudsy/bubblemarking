@@ -1,6 +1,6 @@
 import cv2
 import pypdfium2 as pdfium
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 import numpy as np
 import sys
 import argparse
@@ -37,7 +37,10 @@ def get_image_from_file(doc,page_number,**kwargs):
 def create_pdf():
     return pdfium.PdfDocument.new()
 ###############################################################################
-def add_image_to_pdf(pdf,image):
+def add_image_to_pdf(pdf,image,**kwargs):
+    scale = kwargs.get("scale", 0.35)
+    #shrink image to "scale" of original size
+    image = cv2.resize(image, (0,0), fx=scale, fy=scale)
     pdfimage = pdfium.PdfImage.new(pdf)
     pdfimage.set_bitmap(PdfBitmap.from_pil(Image.fromarray(image)))
     width,height = pdfimage.get_size()
