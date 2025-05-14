@@ -23,9 +23,11 @@ File Format
 ===========
 The answer file format is a CSV or XLSX file with no headers. Each row contains a question number and the comma separated answers. E.g.,
 
+```
 1,"A,B,E"
 2,"A"
 ...
+```
 
 If answers are in the scans, they should appear with matriculation number 00000000
 
