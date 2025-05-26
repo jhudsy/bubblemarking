@@ -69,7 +69,7 @@ def main():
             df["Matriculation number"] = unknown_matriculation_number
             unknown_matriculation_number -= 1
         
-        student_answer_df = pd.concat([student_answer_df,df],ignore_index=True)
+        student_answer_df = pd.concat([df,student_answer_df],ignore_index=True)
                 
     #read the answers from the answer file or from student_answer_df        
     
