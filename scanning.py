@@ -7,8 +7,6 @@ import argparse
 from PIL import Image
 from pypdfium2 import PdfBitmap
 
-
-import scipy.signal
 import pandas as pd
 
 from copy import deepcopy
@@ -270,6 +268,8 @@ def get_matriculation_number(image,bars,**kwargs):
     #iterate through each column finding the minimum
     for j in range(len(offsets)):
         min_index = np.argmin(brightness_matrix[:,j])
+        if brightness_matrix[min_index,j] > 0.9*np.max(brightness_matrix[:,j]): #N.B. Constant here
+            return None #no matriculation number found, all values are too high
         matriculation_number += (min_index)*10**(7-j)
         #plt.imshow(image[bars[min_index+2][0]:bars[min_index+2][1],right+offsets[j]-window_size//2:right+offsets[j]+window_size//2])
         #plt.show()
