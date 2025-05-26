@@ -1,6 +1,5 @@
 import cv2
 import pypdfium2 as pdfium
-#import matplotlib.pyplot as plt
 import numpy as np
 import sys
 import argparse
