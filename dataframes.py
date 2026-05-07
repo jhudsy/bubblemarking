@@ -1,95 +1,206 @@
-import pandas as pd
+"""Answer-key loading and results-CSV construction.
+
+Letters (``A``–``E``) are the user-visible representation; option indices
+(``0``–``4``) are the internal one used by :class:`scanning.PageScan`. The
+helpers :func:`options_to_letters` and :func:`letters_to_options` cross
+that boundary. :func:`build_output_df` is the single source of truth for
+the export schema."""
 import logging
-import sys
+from dataclasses import dataclass, field
+from typing import Optional
 
-def read_answers_from_file(filename):
-    try:
-        answers_df = pd.read_csv(filename,header=None,names=["Question","Answer"])
-    except:
-        answers_df = pd.read_excel(filename,header=None,names=["Question","Answer"])
-    return answers_df
-###############################################################################
-def read_answers_from_df(df,**kwargs):
-    
-    matriculation_number = kwargs.get("matriculation_number", "00000000")
-    answers_df = df[df["Matriculation number"]==matriculation_number]
-    answers_df = answers_df.drop(columns=["Matriculation number"])
-    #remove the row with matriculation number 0000000 from student_answer_df
-    df = df[df["Matriculation number"]!=matriculation_number]
-    if len(answers_df) == 0:
-        logging.fatal("No answer sheet found in scans")
-        #sys.exit(1)
-    return answers_df
-###############################################################################
-def  compute_mark(answer,correct_answer):
-    """returns a triple (num_correct,num_incorrect) where num_correct is the number of correct answers and num_incorrect is the number of incorrect answers given"""
-    num_correct = 0
-    num_incorrect = 0
-    #answer and correct_answer are strings of the form "A,B,C"
-    if len(answer) == 0: #handle the case where the student has not answered the question
-        return 0,0
-    
-    #remove all spaces from answer and correct_answer
-    answer = answer.replace(" ","")
-    correct_answer = correct_answer.replace(" ","")
+import pandas as pd
 
-    answer = answer.split(",")
-    correct_answer = correct_answer.split(",")
+from bubblemarking.scanning import (
+    ANSWER_KEY_MATRIC,
+    UNREAD_MATRIC,
+    PageScan,
+)
 
-    for a in answer:        
-        if a in correct_answer:
-            num_correct += 1
-        else:
-            num_incorrect += 1
 
-    return num_correct,num_incorrect
+def options_to_letters(options) -> str:
+    """[0, 2, 4] -> 'A,C,E'. Empty -> ''."""
+    return ",".join(chr(65 + o) for o in sorted(options))
 
-###############################################################################
-def compute_marks(student_answer_df,answers_df):
-    for i in range(len(student_answer_df)):
-        question = student_answer_df.iloc[i]["Question"]
-        if question not in answers_df["Question"].values:
-            logging.warning(f"Question {question} not in answer sheet")
+
+def letters_to_options(text) -> list:
+    """'A,C,E' -> [0, 2, 4]. Tolerant of spaces and empty input."""
+    if text is None:
+        return []
+    s = str(text).strip()
+    if not s:
+        return []
+    out = []
+    for c in s.replace(" ", "").split(","):
+        if not c:
             continue
-        answer = student_answer_df.iloc[i]["Answer"]
-        correct_answer = answers_df[answers_df["Question"]==question]["Answer"].values[0]
-        num_correct,num_incorrect = compute_mark(answer,correct_answer)
+        u = c.upper()
+        if "A" <= u <= "Z":
+            out.append(ord(u) - 65)
+    return sorted(set(out))
 
-        student_answer_df.at[i,"Correct"] = num_correct
-        student_answer_df.at[i,"Incorrect"] = num_incorrect
-    return student_answer_df
-###############################################################################
-def make_output_df(student_answer_df,answers_df):
-    #create an output df with the columns Matriculation number, Question1, ..., QuestionN where N is the number of questions. The first row will have matriculation number 0000000 and the total number of correct answers for each question. E.g., if question 3 had 5 correct answers, the cell for question 3 will contain 5. We also have Question1Answer, ..., QuestionNAnswer where the first row will contain the correct answers for each question. E.g., if question 3 had answers A,B,C by the student the cell for Question3Answer will contain "A,B,C"
-    output_df = pd.DataFrame(columns=["Matriculation number"])
-    output_df["Matriculation number"] = ["00000000"]
-    #compute total number of questions by looking at answers
-    total_questions = len(answers_df)
-    #add columns for each question and the number of correct answers and the correct answers using the answer_df dataframe
-    for i in range(1,total_questions+1):
-        output_df["Question"+str(i)+"NumCorrect"] = len(answers_df[answers_df["Question"]==i]["Answer"].values[0].split(","))
-        output_df["Question"+str(i)+"NumIncorrect"] = 0
-        output_df["Question"+str(i)+"Answer"] = answers_df[answers_df["Question"]==i]["Answer"].values[0]
-        output_df = output_df.copy() #try defragment the df.
 
-    #now fill in the student answers into output_df
-    for i in range(len(student_answer_df)):
-        matriculation_number = student_answer_df.iloc[i]["Matriculation number"]
-        question = student_answer_df.iloc[i]["Question"] #question number
-        answer = student_answer_df.iloc[i]["Answer"] #answer string, e.g., "A,B,C"
-        num_correct = student_answer_df.iloc[i]["Correct"] #number of correct answers
-        num_incorrect = student_answer_df.iloc[i]["Incorrect"] #number of incorrect answers
-           
-        if matriculation_number not in output_df["Matriculation number"].values:
-            output_df = pd.concat([output_df,
-                                   pd.DataFrame({"Matriculation number":[matriculation_number]})],ignore_index=True)
+@dataclass
+class AnswerKey:
+    """Correct answers + per-question weights.
 
-        if question<total_questions+1: #only add the answer if it is a valid question
-            
-            index = output_df[output_df["Matriculation number"]==matriculation_number].index[0]
+    ``questions[q]`` is the set of correct option indices.
+    ``weights[q]`` is the question's worth (default 1.0)."""
+    questions: dict = field(default_factory=dict)
+    weights: dict = field(default_factory=dict)
 
-            output_df.at[index,"Question"+str(question)+"NumCorrect"] = num_correct
-            output_df.at[index,"Question"+str(question)+"NumIncorrect"] = num_incorrect
-            output_df.at[index,"Question"+str(question)+"Answer"] = answer
+    def __len__(self):
+        return len(self.questions)
 
-    return output_df
+    @property
+    def num_questions(self) -> int:
+        return max(self.questions.keys()) if self.questions else 0
+
+    def correct_for(self, q: int) -> set:
+        return self.questions.get(q, set())
+
+    def weight_for(self, q: int) -> float:
+        return float(self.weights.get(q, 1.0))
+
+
+def read_answer_key_from_file(filename) -> AnswerKey:
+    """Read a CSV/XLSX answer key. Columns:
+
+    1. Question number
+    2. Comma-separated correct letters (e.g. ``"A,C"``)
+    3. (optional) Question weight — default 1.0
+
+    A header row is tolerated and skipped."""
+    try:
+        df = pd.read_csv(filename, header=None)
+    except Exception:
+        df = pd.read_excel(filename, header=None)
+
+    if df.empty:
+        return AnswerKey()
+    # Skip header row if present.
+    try:
+        int(df.iloc[0, 0])
+    except (ValueError, TypeError):
+        df = df.iloc[1:]
+
+    questions = {}
+    weights = {}
+    for _, row in df.iterrows():
+        try:
+            q = int(row.iloc[0])
+        except (ValueError, TypeError):
+            continue
+        questions[q] = set(letters_to_options(row.iloc[1]))
+        if len(row) >= 3 and pd.notna(row.iloc[2]):
+            try:
+                weights[q] = float(row.iloc[2])
+            except (ValueError, TypeError):
+                logging.warning(f"Question {q}: ignoring non-numeric weight {row.iloc[2]!r}")
+    return AnswerKey(questions=questions, weights=weights)
+
+
+def extract_answer_key_from_scans(scans) -> Optional[AnswerKey]:
+    """Pull the answer key off the page whose matric reads as 00000000.
+    Weights default to 1.0 since scans don't carry weight information."""
+    for s in scans:
+        if s.matric_string() == ANSWER_KEY_MATRIC:
+            # Trim trailing empty questions — many sheets have <120 questions.
+            keys = {}
+            last_filled = 0
+            for q in sorted(s.answers.keys()):
+                if s.answers[q]:
+                    last_filled = q
+            for q in sorted(s.answers.keys()):
+                if q <= last_filled:
+                    keys[q] = set(s.answers[q])
+            return AnswerKey(questions=keys)
+    return None
+
+
+def question_marks(selected: set, correct: set):
+    """Returns (num_correct_selected, num_incorrect_selected)."""
+    return len(selected & correct), len(selected - correct)
+
+
+def score_scan(scan: PageScan, answer_key: AnswerKey, strategy, options=None,
+               num_options: int = 5) -> float:
+    """Apply a scoring strategy across every question in the answer key
+    and return the student's total."""
+    options = options or {}
+    total = 0.0
+    for q in range(1, answer_key.num_questions + 1):
+        correct = answer_key.correct_for(q)
+        if not correct:
+            continue
+        selected = set(scan.answers.get(q, []))
+        weight = answer_key.weight_for(q)
+        total += float(strategy.score(selected, correct, weight, num_options, **options))
+    return total
+
+
+def max_total(answer_key: AnswerKey, strategy, options=None, num_options: int = 5) -> float:
+    """The maximum achievable total under this strategy — i.e. the score the
+    answer key itself would get."""
+    options = options or {}
+    total = 0.0
+    for q in range(1, answer_key.num_questions + 1):
+        correct = answer_key.correct_for(q)
+        if not correct:
+            continue
+        weight = answer_key.weight_for(q)
+        total += float(strategy.score(correct, correct, weight, num_options, **options))
+    return total
+
+
+def build_output_df(scans, answer_key: AnswerKey, strategy=None,
+                    options=None, num_options: int = 5) -> pd.DataFrame:
+    """Build the per-student results dataframe. Row 0 is the answer key.
+
+    Duplicate or unread matric numbers are renumbered to 9999999x to keep the
+    table unambiguous; the GUI surfaces these as "needs review" for the user
+    to fix interactively before export.
+
+    If ``strategy`` is given, a ``Total`` column is added; the answer-key row
+    holds the maximum achievable total."""
+    nq = answer_key.num_questions
+    rows = []
+
+    key_row = {"Matriculation number": ANSWER_KEY_MATRIC}
+    for q in range(1, nq + 1):
+        correct = answer_key.correct_for(q)
+        key_row[f"Question{q}NumCorrect"] = len(correct)
+        key_row[f"Question{q}NumIncorrect"] = 0
+        key_row[f"Question{q}Answer"] = options_to_letters(correct)
+        key_row[f"Question{q}Weight"] = answer_key.weight_for(q)
+    if strategy is not None:
+        key_row["Total"] = max_total(answer_key, strategy, options, num_options)
+    rows.append(key_row)
+
+    seen = set()
+    fallback = 99999999
+    for s in scans:
+        matric = s.matric_string()
+        if matric == ANSWER_KEY_MATRIC:
+            continue
+        if matric == UNREAD_MATRIC or matric in seen:
+            if matric in seen:
+                logging.warning(f"Duplicate matriculation number {matric} on page {s.page_index + 1}")
+            matric = str(fallback)
+            fallback -= 1
+        seen.add(matric)
+
+        row = {"Matriculation number": matric}
+        for q in range(1, nq + 1):
+            selected = set(s.answers.get(q, []))
+            correct = answer_key.correct_for(q)
+            ncorrect, nincorrect = question_marks(selected, correct)
+            row[f"Question{q}NumCorrect"] = ncorrect
+            row[f"Question{q}NumIncorrect"] = nincorrect
+            row[f"Question{q}Answer"] = options_to_letters(selected)
+            row[f"Question{q}Weight"] = answer_key.weight_for(q)
+        if strategy is not None:
+            row["Total"] = score_scan(s, answer_key, strategy, options, num_options)
+        rows.append(row)
+
+    return pd.DataFrame(rows)

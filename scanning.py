@@ -1,342 +1,428 @@
+"""Image processing pipeline for the MCQ marksheet.
+
+Top-level entry point is :func:`scan_page`: feed it a rendered page image
+and it returns a :class:`PageScan` containing the detected matriculation
+number, per-question answers, brightness samples, geometry caches, and
+flags describing anything the scanner is unsure about.
+
+The module is intentionally side-effect free aside from logging. Failure
+modes (unreadable page, missing bars, ambiguous bubbles) surface as fields
+on the returned :class:`PageScan` rather than exceptions, so the GUI can
+queue them for human review."""
 import cv2
 import pypdfium2 as pdfium
 import numpy as np
-import sys
-import argparse
-from PIL import Image
-from pypdfium2 import PdfBitmap
-
-import pandas as pd
-
-from copy import deepcopy
-
 import logging
+from dataclasses import dataclass, field
+from typing import Optional
 
+
+# Bubble grid geometry. The MCQ sheet has 4 columns of 30 questions, 5 options each.
+# Offsets are pixel deltas from the right edge of each black bar at SCALE=5.0.
+QUESTION_OFFSETS = [
+    [-2397, -2325, -2252, -2180, -2108],  # questions 1..30
+    [-1819, -1747, -1674, -1602, -1530],  # questions 31..60
+    [-1241, -1169, -1096, -1024, -951],   # questions 61..90
+    [-663, -590, -519, -446, -374],       # questions 91..120
+]
+MATRIC_OFFSETS = [-594, -522, -449, -377, -305, -233, -161, -89]
+ANSWER_BAR_START = 12  # bars[12..41] are the 30 answer rows
+MATRIC_BAR_START = 2   # bars[2..11] are the 10 matric digit rows
+NUM_OPTIONS = 5
+MATRIC_LENGTH = 8
+DEFAULT_NUM_QUESTIONS = 120
+UNREAD_MATRIC = "99999999"
+ANSWER_KEY_MATRIC = "00000000"
+
+
+@dataclass
+class PageScan:
+    """All data extracted from a single scanned page, plus geometry for editing."""
+    page_index: int
+    prepared_image: Optional[np.ndarray] = None
+    bars: Optional[list] = None
+    right_bar_cache: dict = field(default_factory=dict)
+    matric_right_cache: dict = field(default_factory=dict)
+    matric_brightness: Optional[np.ndarray] = None
+    matric_digits: list = field(default_factory=lambda: [None] * MATRIC_LENGTH)
+    question_brightness: dict = field(default_factory=dict)
+    answers: dict = field(default_factory=dict)
+    confidence: dict = field(default_factory=dict)
+    matric_confidence: list = field(default_factory=list)
+    flags: list = field(default_factory=list)
+    num_questions: int = DEFAULT_NUM_QUESTIONS
+    one_answer_only: bool = False
+
+    @property
+    def unreadable(self) -> bool:
+        return self.prepared_image is None or self.bars is None
+
+    def matric_string(self) -> str:
+        if any(d is None for d in self.matric_digits):
+            return UNREAD_MATRIC
+        return "".join(str(d) for d in self.matric_digits)
+
+    def set_matric_digit(self, position: int, value):
+        if not (0 <= position < MATRIC_LENGTH):
+            raise ValueError(f"matric position {position} out of range")
+        if value is not None and not (0 <= value <= 9):
+            raise ValueError(f"matric digit {value} out of range")
+        self.matric_digits[position] = value
+
+    def toggle_answer(self, question: int, option: int):
+        ans = self.answers.setdefault(question, [])
+        if option in ans:
+            ans.remove(option)
+        else:
+            if self.one_answer_only:
+                ans.clear()
+            ans.append(option)
+            ans.sort()
+
+    def bubble_rect(self, question: int, option: int, **kwargs):
+        if self.bars is None:
+            return None
+        return question_bubble_rect(self.bars, self.right_bar_cache, question, option, **kwargs)
+
+    def matric_bubble_rect(self, digit_value: int, position: int, **kwargs):
+        if self.bars is None:
+            return None
+        return matric_bubble_rect(self.bars, self.matric_right_cache, digit_value, position, **kwargs)
+
+
+###############################################################################
+# PDF / image plumbing
 ###############################################################################
 def get_file(file_name):
     return pdfium.PdfDocument(file_name)
 
+
 def get_number_of_pages(doc):
     return len(doc)
-    
-def get_image_from_file(doc,page_number,**kwargs):
+
+
+def get_image_from_file(doc, page_number, **kwargs):
     SCALE = kwargs.get("SCALE", 5.0)
     page = doc[page_number]
-
-    image = page.render(scale = SCALE,no_smoothimage=True,optimize_mode="print")
-    image = image.to_numpy()
-
+    image = page.render(scale=SCALE, no_smoothimage=True, optimize_mode="print").to_numpy()
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
     return image
 
-###############################################################################
-def create_pdf():
-    return pdfium.PdfDocument.new()
-###############################################################################
-def add_image_to_pdf(pdf,image,**kwargs):
-    scale = kwargs.get("scale", 0.35)
-    #shrink image to "scale" of original size
-    image = cv2.resize(image, (0,0), fx=scale, fy=scale)
-    pdfimage = pdfium.PdfImage.new(pdf)
-    pdfimage.set_bitmap(PdfBitmap.from_pil(Image.fromarray(image)))
-    width,height = pdfimage.get_size()
-    matrix = pdfium.PdfMatrix().scale(width,height)
-    pdfimage.set_matrix(matrix)
-
-    page = pdf.new_page(width,height)
-    page.insert_obj(pdfimage)
-    page.gen_content()
-###############################################################################
-def save_pdf(pdf,file_name):
-    pdf.save(file_name,version=17)
 
 ###############################################################################
-
-def straighten_image(original_image,**kwargs):
+# Image preparation
+###############################################################################
+def straighten_image(original_image, **kwargs):
     threshold = kwargs.get("threshold", 40)
     image_percent = kwargs.get("image_percent", 0.05)
     image = cv2.cvtColor(original_image, cv2.COLOR_BGR2GRAY)
     height = image.shape[0]
-
     _, thresh = cv2.threshold(image, threshold, 255, cv2.THRESH_BINARY)
     thresh = cv2.bitwise_not(thresh)
-    linesTop = cv2.HoughLinesP(thresh[0:int(height*image_percent)],1, np.pi/180, 100, minLineLength=5, maxLineGap=100) #N.B., 5% here
-    linesBottom = cv2.HoughLinesP(thresh[int(height-height*image_percent):],1, np.pi/180, 100, minLineLength=20, maxLineGap=100)
-    
+    linesTop = cv2.HoughLinesP(
+        thresh[0:int(height * image_percent)], 1, np.pi / 180, 100,
+        minLineLength=5, maxLineGap=100,
+    )
+    linesBottom = cv2.HoughLinesP(
+        thresh[int(height - height * image_percent):], 1, np.pi / 180, 100,
+        minLineLength=20, maxLineGap=100,
+    )
+    if linesTop is None or linesBottom is None:
+        return original_image
     lines = np.concatenate((linesTop, linesBottom))
     angles = []
     for line in lines:
         x1, y1, x2, y2 = line[0]
         angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
         angles.append(angle)
+    angle = float(np.mean(angles))
+    M = cv2.getRotationMatrix2D((image.shape[1] // 2, image.shape[0] // 2), angle, 1)
+    return cv2.warpAffine(original_image, M, (image.shape[1], image.shape[0]))
 
-    angle = np.mean(angles)
-    
-    image = cv2.warpAffine(original_image, cv2.getRotationMatrix2D((image.shape[1]//2, image.shape[0]//2), angle, 1), (image.shape[1], image.shape[0]))
-    return image
-###############################################################################
+
 def find_black_bars(orig_image, **kwargs):
-    
     threshold = kwargs.get("threshold", 127)
-    right_scan_percent = kwargs.get("right_scan_percent", 0.005) 
-    num_black_Bars = kwargs.get("num_black_Bars", 44)
-    min_bar_height = kwargs.get("min_bar_height", 20) #minimum height of a black bar, else we ignore it.
+    right_scan_percent = kwargs.get("right_scan_percent", 0.005)
+    num_black_bars = kwargs.get("num_black_bars", kwargs.get("num_black_Bars", 44))
+    min_bar_height = kwargs.get("min_bar_height", 20)
     width = orig_image.shape[1]
 
-
     image = cv2.cvtColor(orig_image, cv2.COLOR_BGR2GRAY)
-
     _, thresh = cv2.threshold(image, threshold, 255, cv2.THRESH_BINARY)
 
-    #to make it more robust we scan from right to left until we actually find some black bars.
+    # Scan from right edge inward looking for the column of black bars.
     black_bars_found = False
-    #print("thresh:",orig_image.shape[0]*255-num_black_Bars*min_bar_height*255)
-    x = int(width-width*right_scan_percent)
+    x = int(width - width * right_scan_percent)
     while not black_bars_found and x > 0:
-        #print(x,np.sum(thresh[:,x]))
-        if np.sum(thresh[:,x]) < orig_image.shape[0]*255 - num_black_Bars*min_bar_height*255:
+        if np.sum(thresh[:, x]) < orig_image.shape[0] * 255 - num_black_bars * min_bar_height * 255:
             black_bars_found = True
         x -= 1
-    
-    start = x
 
-    while np.sum(thresh[:,x]) < orig_image.shape[0]*255 - num_black_Bars*min_bar_height*255:
-        x-=1
-    
+    if not black_bars_found:
+        return None
+
+    start = x
+    while x > 0 and np.sum(thresh[:, x]) < orig_image.shape[0] * 255 - num_black_bars * min_bar_height * 255:
+        x -= 1
     end = x
-    #print(f"Start: {start}, End: {end}")    
-    mid = (start+end)//2
-    #right_scan_percent = int((width-(start+end/2))/width)
-    #print(f"Right scan percent: {right_scan_percent}")
-    #cv2.line(thresh,(mid,0),(mid,thresh.shape[0]),(0,0,0),5)
-    #
-    #plt.imshow(thresh,cmap="gray")
-    #plt.show()
+    mid = (start + end) // 2
 
     blackBars = []
     foundTop = False
     cur_height = 0
-    for i in range(0,thresh.shape[0]):
-        #print(thresh[i,int(-width*right_scan_percent)])
-        #if thresh[i,int(-width*right_scan_percent)] == 0 and not foundTop: 
-        if thresh[i,mid] == 0 and not foundTop: 
+    top = 0
+    for i in range(0, thresh.shape[0]):
+        if thresh[i, mid] == 0 and not foundTop:
             foundTop = True
             top = i
-            cur_height = 0       
-        #elif thresh[i,int(-width*right_scan_percent)] == 0 and foundTop:
-        elif thresh[i,mid] == 0 and foundTop:
+            cur_height = 0
+        elif thresh[i, mid] == 0 and foundTop:
             cur_height += 1
-        #if thresh[i,int(-width*right_scan_percent)] == 255 and foundTop:
-        if thresh[i,mid] == 255 and foundTop:
+        if thresh[i, mid] == 255 and foundTop:
             foundTop = False
             if cur_height > min_bar_height:
-                blackBars.append((top-1, i+7)) #enlarge the area a bit.
-                #cur_height = 0
-                #print(blackBars[-1])
-        
-    #cv2.line(thresh,(mid,0),(mid,thresh.shape[0]),(0,0,0),3)
-    #plt.imshow(thresh,cmap="gray")
-    #plt.show()
+                blackBars.append((top - 1, i + 7))
 
-    if len(blackBars) != num_black_Bars: 
+    if len(blackBars) != num_black_bars:
         return None
     return blackBars
-###############################################################################
+
+
 def prepare_image(image, **kwargs):
-    if image.shape[0] < image.shape[1]: #if it's been loaded sideways
+    """Straighten and locate the black bars. Tries multiple binarisation thresholds
+    and a 180-degree rotation before giving up."""
+    if image.shape[0] < image.shape[1]:
         image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
     new_image = straighten_image(image, **kwargs)
-    blackBars = find_black_bars(new_image, **kwargs)
-    if blackBars == None:
-        new_image = cv2.rotate(new_image, cv2.ROTATE_180)
-        blackBars = find_black_bars(new_image, **kwargs)
-    if blackBars == None:
-        return None,None
-    return new_image, blackBars  
+
+    # Threshold sweep — scans with mild over/underexposure can confuse a single
+    # threshold. Try a small range.
+    threshold_candidates = kwargs.pop("threshold_candidates", [127, 100, 150, 80, 170])
+    for orientation in (new_image, cv2.rotate(new_image, cv2.ROTATE_180)):
+        for thr in threshold_candidates:
+            bars = find_black_bars(orientation, threshold=thr, **kwargs)
+            if bars is not None:
+                return orientation, bars
+    return None, None
+
+
+###############################################################################
+# Bubble geometry
 ###############################################################################
 def find_right(line):
-    #used in offset calculations in get_mark_indexes function
+    """Locate the right edge of a black bar within a horizontal slice."""
     line = cv2.cvtColor(line, cv2.COLOR_BGR2GRAY)
     line = cv2.threshold(line, 200, 255, cv2.THRESH_BINARY)[1]
-    line = cv2.erode(line,np.ones([3,3]),iterations=2)
-    #invert image
+    line = cv2.erode(line, np.ones([3, 3]), iterations=2)
     line = cv2.bitwise_not(line)
     count = 0
-    for i in range(line.shape[1]-1,0,-1): #we are looking where the black bar ends by summing up the white pixels
-        if np.sum(line[5:25,i]) > 4000: #N.B. Constant here
+    for i in range(line.shape[1] - 1, 0, -1):
+        if np.sum(line[5:25, i]) > 4000:
             count += 1
-        elif count<60: #N.B. Constant here
+        elif count < 60:
             count = 0
-        else: #we have found a white cell and count is more than 60
-            #plt.imshow(line[:,i:],cmap="gray")
-            #plt.show()
+        else:
             return i
-    logging.critical("Error, black bar not found")
+    logging.warning("Could not find right edge of black bar")
     return None
-###############################################################################
-def get_question_answers(image,question_number,bars,right_bar_cache,**kwargs):
-    #image is the image
-    #question_number is the question number
-    #bars is the black bars
-    #right_bar_cache is a cache of the right bar for each question
-    #additional arguments:
-    #window_size is the size of the window to search for marks
-    #window_height is the height of the window to search for marks
-    #threshold is the threshold for deciding whether a mark is filled or not, expressed as a percentage of the maximum
-    #red_threshold is the threshold for the red channel
-    #mark_image is a boolean indicating whether to write a mark on the image showing where the mark was found
-    #Returns an array of answers for the question and an updated right_bar_cache as needed.
-    #We assume that at least one of the answers is not filled in.
-    offsets = [[-2397,-2325,-2252,-2180,-2108],
-               [-1819,-1747,-1674,-1602,-1530],
-               [-1241,-1169,-1096,-1024,-951],
-               [-663,-590,-519,-446,-374]]
-    
-    window_height = kwargs.get("window_height", 1)
+
+
+def question_bubble_rect(bars, right_bar_cache, question, option, **kwargs):
+    """Return (x1, y1, x2, y2) for a bubble. `question` is 1-indexed."""
     window_size = kwargs.get("window_size", 58)
-    threshold = kwargs.get("threshold", 0.8)
+    window_height = kwargs.get("window_height", 1)
+    q0 = question - 1
+    bar_idx = q0 % 30 + ANSWER_BAR_START
+    column = q0 // 30
+    bar = bars[bar_idx]
+    right = right_bar_cache.get(bar_idx)
+    if right is None:
+        return None
+    offset = QUESTION_OFFSETS[column][option]
+    line_height = bar[1] - bar[0]
+    x1 = right + offset - window_size // 2
+    x2 = right + offset + window_size // 2
+    y1 = bar[0] + int((1 - window_height) * line_height)
+    y2 = bar[0] + int(window_height * line_height)
+    return (x1, y1, x2, y2)
+
+
+def matric_bubble_rect(bars, matric_right_cache, digit_value, position, **kwargs):
+    window_size = kwargs.get("window_size", 60)
+    window_height = kwargs.get("window_height", 0.8)
+    bar_idx = digit_value + MATRIC_BAR_START
+    bar = bars[bar_idx]
+    right = matric_right_cache.get(bar_idx)
+    if right is None:
+        return None
+    offset = MATRIC_OFFSETS[position]
+    line_height = bar[1] - bar[0]
+    x1 = right + offset - window_size // 2
+    x2 = right + offset + window_size // 2
+    y1 = bar[0] + int((1 - window_height) * line_height)
+    y2 = bar[0] + int(window_height * line_height)
+    return (x1, y1, x2, y2)
+
+
+###############################################################################
+# Bubble brightness sampling
+###############################################################################
+def _sample_window(image, x1, y1, x2, y2, red_threshold):
+    window = image[y1:y2, x1:x2].copy()
+    if window.size == 0:
+        return 0
+    window = window[:, :, 0]
+    window = cv2.threshold(window, red_threshold, 255, cv2.THRESH_BINARY)[1]
+    window = cv2.erode(window, np.ones([3, 3]), iterations=2)
+    return int(np.sum(window))
+
+
+def question_confidence(brightness):
+    """Return 0..1 — high when the largest gap between sorted bubble brightnesses
+    is wide compared to the maximum brightness. Ambiguous pages (all bubbles
+    similar) score near zero."""
+    if brightness is None or len(brightness) == 0:
+        return 0.0
+    m = float(np.max(brightness))
+    if m <= 0:
+        return 0.0
+    sorted_b = np.sort(brightness)
+    gaps = np.diff(sorted_b)
+    if len(gaps) == 0:
+        return 0.0
+    return float(np.max(gaps) / m)
+
+
+def _detect_question_answers(brightness, threshold, one_answer_only):
+    """Decide which options are filled given a 5-element brightness array.
+    Lower brightness = darker = filled."""
+    m = np.max(brightness)
+    if m <= 0:
+        return []
+    answers = [i for i, b in enumerate(brightness) if b < threshold * m]
+    if one_answer_only:
+        ans = int(np.argmin(brightness))
+        if brightness[ans] > 0.9 * m:
+            return []
+        return [ans]
+    return answers
+
+
+def scan_question(image, bars, right_bar_cache, question, **kwargs):
+    """Sample the 5 bubbles for one question. Returns (answers, brightness, updated cache)."""
     red_threshold = kwargs.get("red_threshold", 170)
     one_answer_only = kwargs.get("one_answer_only", False)
-    mark_image = kwargs.get("mark_image", False)
+    threshold = kwargs.get("threshold", 0.8)
 
-    #the column we need is question_number//30 and the bar we need is 12+question_number%30
-    line = image[bars[question_number%30+12][0]:bars[question_number%30+12][1],:]
-    if right_bar_cache.get(question_number%30+12,None) is None:
-        right_bar_cache[question_number%30+12] = find_right(line)
-    right = right_bar_cache[question_number%30+12]
+    q0 = question - 1
+    bar_idx = q0 % 30 + ANSWER_BAR_START
+    if bar_idx not in right_bar_cache:
+        line = image[bars[bar_idx][0]:bars[bar_idx][1], :]
+        right_bar_cache[bar_idx] = find_right(line)
 
-    offset = offsets[question_number//30]
+    brightness = np.zeros(NUM_OPTIONS)
+    for opt in range(NUM_OPTIONS):
+        rect = question_bubble_rect(bars, right_bar_cache, question, opt, **kwargs)
+        if rect is None:
+            continue
+        x1, y1, x2, y2 = rect
+        brightness[opt] = _sample_window(image, x1, y1, x2, y2, red_threshold)
 
-    brightness_array = np.zeros([len(offset)])
-    for i in range(len(offset)):
-        window = line[int((1-window_height)*line.shape[0]):int(window_height*line.shape[0]),right+offset[i]-window_size//2:right+offset[i]+window_size//2].copy()
-        window = window[:,:,0] #take only the red channel
-        window = cv2.threshold(window, red_threshold, 255, cv2.THRESH_BINARY)[1]
-        window=cv2.erode(window,np.ones([3,3]),iterations=2)
-        brightness_array[i] = np.sum(window)
-    
-    #if an element in the brhightness array is 10% less than the maximum, we assume it is filled in
-    answers = []
-    for i in range(len(brightness_array)):
-        if brightness_array[i] < threshold*np.max(brightness_array):
-            answers.append(i)
+    answers = _detect_question_answers(brightness, threshold, one_answer_only)
+    return answers, brightness, right_bar_cache
 
-    if one_answer_only:
-        #the answer is the index of the least bright element
-        ans = np.argmin(brightness_array)
-        
-        if len(answers) > 1:
-            logging.warning(f"Student has selected more than one answer ({answers}) for question {question_number+1}")
-            #logging.warning(f"{brightness_array/np.max(brightness_array)}")
-        if brightness_array[ans] > 0.9*np.max(brightness_array): #N.B. Constant here
-            answers = []
-        else:      
-            answers = [int(ans)]
-    
-    if mark_image:
-        for i in range(len(offset)):
-            if i in answers:
-                cv2.rectangle(image,(right+offset[i]-window_size//2,bars[question_number%30+12][0]+int((1-window_height)*line.shape[0])),(right+offset[i]+window_size//2,bars[question_number%30+12][0]+int(window_height*line.shape[0])),(0,255,0),3)
-        if len(answers)==0:
-            #draw a red rectangle across whole line
-            cv2.rectangle(image,(right+offset[0]-window_size//2,bars[question_number%30+12][0]),(right+offset[-1]+window_size//2,bars[question_number%30+12][1]),(0,0,255),3)
-            
-        
-    return answers,right_bar_cache
 
-###############################################################################
-def get_matriculation_number(image,bars,**kwargs):
-    offsets = [-594, -522, -449, -377, -305, -233, -161, -89]
-    window_height = kwargs.get("window_height", 0.8)
-    window_size = kwargs.get("window_size", 60)
+def scan_matriculation(image, bars, matric_right_cache, **kwargs):
+    """Sample the 10-digit-by-8-position matriculation block.
+
+    For each position (column) the darkest bubble across the 10 digit rows
+    wins, provided it is at least 10% darker than the brightest. Confidence
+    is the normalised gap between the darkest and second-darkest digit.
+
+    Returns ``(digits, brightness_matrix, confidence_per_position, cache)``,
+    where ``digits`` is a list of 8 ints or ``None`` when no digit was
+    confidently detected at that position."""
     red_threshold = kwargs.get("red_threshold", 200)
-    brightness_matrix = np.zeros([10,len(offsets)])
-    mark_image = kwargs.get("mark_image", False)
 
-    for i in range(2,12):
-        line = image[bars[i][0]:bars[i][1],:]
-        right = find_right(line)
-        for j in range(len(offsets)):
-            window = line[int((1-window_height)*line.shape[0]):int(window_height*line.shape[0]),right+offsets[j]-window_size//2:right+offsets[j]+window_size//2].copy()
-            window = window[:,:,0]
-            window = cv2.threshold(window, red_threshold, 255, cv2.THRESH_BINARY)[1]
-            brightness_matrix[i-2,j] = np.sum(window)
-    
-    matriculation_number = 0
-    #iterate through each column finding the minimum
-    for j in range(len(offsets)):
-        min_index = np.argmin(brightness_matrix[:,j])
-        if brightness_matrix[min_index,j] > 0.9*np.max(brightness_matrix[:,j]): #N.B. Constant here
-            return None #no matriculation number found, all values are too high
-        matriculation_number += (min_index)*10**(7-j)
-        #plt.imshow(image[bars[min_index+2][0]:bars[min_index+2][1],right+offsets[j]-window_size//2:right+offsets[j]+window_size//2])
-        #plt.show()
+    brightness = np.zeros((10, MATRIC_LENGTH))
+    for digit in range(10):
+        bar_idx = digit + MATRIC_BAR_START
+        if bar_idx not in matric_right_cache:
+            line = image[bars[bar_idx][0]:bars[bar_idx][1], :]
+            matric_right_cache[bar_idx] = find_right(line)
+        for pos in range(MATRIC_LENGTH):
+            rect = matric_bubble_rect(bars, matric_right_cache, digit, pos, **kwargs)
+            if rect is None:
+                continue
+            x1, y1, x2, y2 = rect
+            brightness[digit, pos] = _sample_window(image, x1, y1, x2, y2, red_threshold)
 
-    if mark_image:
-        for i in range(2,12):
-            line = image[bars[i][0]:bars[i][1],:]
-            right = find_right(line)
-            for j in range(len(offsets)):
-                if brightness_matrix[i-2,j] == np.min(brightness_matrix[:,j]):
-                    cv2.rectangle(image,(right+offsets[j]-window_size//2,bars[i][0]+int((1-window_height)*line.shape[0])),(right+offsets[j]+window_size//2,bars[i][0]+int(window_height*line.shape[0])),(0,255,0),3)
-    return str(matriculation_number).zfill(8)
+    digits = []
+    confidence = []
+    for pos in range(MATRIC_LENGTH):
+        col = brightness[:, pos]
+        m = np.max(col)
+        if m <= 0:
+            digits.append(None)
+            confidence.append(0.0)
+            continue
+        idx = int(np.argmin(col))
+        if col[idx] > 0.9 * m:
+            digits.append(None)
+            confidence.append(0.0)
+        else:
+            digits.append(idx)
+            sorted_col = np.sort(col)
+            confidence.append(float((sorted_col[1] - sorted_col[0]) / m))
+    return digits, brightness, confidence, matric_right_cache
 
 
 ###############################################################################
- 
-def get_all_answers(image,bars,**kwargs):
-    num_questions = kwargs.get("num_questions",120)
-    if num_questions == None or num_questions > 120 or num_questions < 1:
-        num_questions = 120
-
-    answer_map = {}
-    right_bar_cache = {}
-    for i in range(num_questions):
-        answer_map[i+1],right_bar_cache = get_question_answers(image,i,bars,right_bar_cache,**kwargs)
-       
-    #logging.debug(f"Answer map: {answer_map}")
-    
-    return answer_map
+# Page-level scan entry point
 ###############################################################################
+def scan_page(image, page_index=0, **kwargs):
+    """Top-level: take a raw rendered PDF page image, return a populated PageScan."""
+    num_questions = kwargs.get("num_questions") or DEFAULT_NUM_QUESTIONS
+    num_questions = min(max(num_questions, 1), DEFAULT_NUM_QUESTIONS)
+    one_answer_only = kwargs.get("one_answer_only", False)
+    low_conf_threshold = kwargs.get("low_conf_threshold", 0.15)
+
+    scan = PageScan(page_index=page_index, num_questions=num_questions, one_answer_only=one_answer_only)
+
+    prepared, bars = prepare_image(image, **kwargs)
+    if prepared is None or bars is None:
+        scan.flags.append("unreadable")
+        return scan
+
+    scan.prepared_image = prepared
+    scan.bars = bars
+
+    digits, matric_b, matric_conf, scan.matric_right_cache = scan_matriculation(
+        prepared, bars, scan.matric_right_cache, **kwargs
+    )
+    scan.matric_digits = digits
+    scan.matric_brightness = matric_b
+    scan.matric_confidence = matric_conf
+    if any(d is None for d in digits):
+        scan.flags.append("no_matric")
+
+    for q in range(1, num_questions + 1):
+        answers, brightness, scan.right_bar_cache = scan_question(
+            prepared, bars, scan.right_bar_cache, q, **kwargs
+        )
+        scan.answers[q] = answers
+        scan.question_brightness[q] = brightness
+        scan.confidence[q] = question_confidence(brightness)
+        if scan.confidence[q] < low_conf_threshold:
+            scan.flags.append(f"low_confidence:{q}")
+        if one_answer_only and len(answers) > 1:
+            scan.flags.append(f"multi_answer:{q}")
+        if not answers:
+            scan.flags.append(f"no_answer:{q}")
+
+    return scan
+
+
 def answers_to_string(answers):
-    #answers is an array containing e.g. [0,2,4] which means the student has selected answers A,C,E
-    #we return a string "A,C,E"
-    
-    if len(answers) == 0:
-        return ""
-    answer_string = ""
-    for a in answers:
-        answer_string += chr(65+a)+","
-    return answer_string[:-1]
-###############################################################################
-def read_image_answers(image,**kwargs):
-    one_answer_only = kwargs.get("one_answer_only",False)
-    num_questions = kwargs.get("num_questions",120)
-    mark_image = kwargs.get("mark_image",False)
-    df = pd.DataFrame(columns=["Matriculation number","Question","Answer"]) #stores student answers
-    prepared_image, blackBars = prepare_image(image)
-    if prepared_image is None:
-        logging.fatal(f"Unable to read page")
-        sys.exit(1)
-    ans = get_all_answers(prepared_image,blackBars,one_answer_only = one_answer_only,num_questions=num_questions,mark_image=mark_image)
-
-    matriculation_number = get_matriculation_number(prepared_image,blackBars,mark_image = mark_image)
-    
-    if matriculation_number is None:
-            matriculation_number = "99999999"
-
-    for j in ans:
-        if one_answer_only and len(ans[j])>1:
-            logging.warning(f"Student {matriculation_number} has selected more than one answer for question {j}")
-        df = pd.concat([df,pd.DataFrame({
-            "Matriculation number":[matriculation_number],
-                "Question":[j],
-                "Answer":[answers_to_string(ans[j])]
-            })],ignore_index=True)
-    return df,prepared_image
-###############################################################################
-
-
-
-    
+    """Convert [0,2,4] -> 'A,C,E'."""
+    return ",".join(chr(65 + a) for a in sorted(answers))
