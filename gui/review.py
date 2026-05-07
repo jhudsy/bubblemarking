@@ -41,9 +41,16 @@ def numpy_rgb_to_qpixmap(arr: np.ndarray) -> QtGui.QPixmap:
     return QtGui.QPixmap.fromImage(qimg)
 
 
-def recompute_flags(scan: PageScan, low_conf_threshold: float = 0.15):
+def recompute_flags(scan: PageScan, low_conf_threshold: float = 0.3):
     """Rebuild the flag list for a scan from its current state. Called after
-    edits so that resolved problems clear themselves from the review queue."""
+    edits so that resolved problems clear themselves from the review queue.
+
+    With cohort calibration, ``confidence`` is the bubble margin from the
+    decision boundary, normalised by half the filled/blank spread. Values
+    near 0 mean a bubble landed on the boundary; values ≥ 1 mean it's at
+    or past one of the medians. We only flag ``low_confidence`` — blank
+    rows are no longer surfaced as ``no_answer`` since they're now
+    high-confidence-blank, not ambiguous."""
     flags = []
     if scan.unreadable:
         flags.append("unreadable")
@@ -55,8 +62,6 @@ def recompute_flags(scan: PageScan, low_conf_threshold: float = 0.15):
         ans = scan.answers.get(q, [])
         if scan.one_answer_only and len(ans) > 1:
             flags.append(f"multi_answer:{q}")
-        if not ans:
-            flags.append(f"no_answer:{q}")
         if scan.confidence.get(q, 1.0) < low_conf_threshold:
             flags.append(f"low_confidence:{q}")
     scan.flags = flags
@@ -127,7 +132,7 @@ class PageImageView(QtWidgets.QGraphicsView):
         self.setTransformationAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setBackgroundBrush(QtGui.QBrush(QtGui.QColor(40, 40, 40)))
 
-    def set_page(self, image, scan: PageScan, answer_key: Optional[AnswerKey], low_conf_threshold=0.15):
+    def set_page(self, image, scan: PageScan, answer_key: Optional[AnswerKey], low_conf_threshold=0.3):
         self._scene.clear()
         self._hit_targets = []
         self._pixmap_item = None
@@ -364,7 +369,7 @@ class ReviewWidget(QtWidgets.QWidget):
         self.answer_key: Optional[AnswerKey] = None
         self.image_cache: Optional[PageImageCache] = None
         self.current_scan_index = -1
-        self.low_conf_threshold = 0.15
+        self.low_conf_threshold = 0.3
         self._build_ui()
 
     def _build_ui(self):
@@ -444,7 +449,7 @@ class ReviewWidget(QtWidgets.QWidget):
         root.addWidget(right, 1)
 
     # ------------------------------------------------------------------ data
-    def set_data(self, scans, answer_key, image_cache, low_conf_threshold=0.15):
+    def set_data(self, scans, answer_key, image_cache, low_conf_threshold=0.3):
         self.scans = scans
         self.answer_key = answer_key
         self.image_cache = image_cache

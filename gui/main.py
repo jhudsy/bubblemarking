@@ -103,6 +103,27 @@ class ScanWorker(QtCore.QObject):
 
                 scans.append(scan)
 
+            # Cohort calibration: pool first-pass labels across the batch to
+            # learn an absolute filled/blank threshold, then re-classify every
+            # bubble. Confidence becomes margin-from-boundary, so the review
+            # queue surfaces only genuinely ambiguous rows.
+            calibration = scanning.calibrate_from_scans(scans)
+            if calibration.valid:
+                logging.info(
+                    f"Calibration: filled median {calibration.filled_median:.0f}, "
+                    f"blank median {calibration.unfilled_median:.0f}, "
+                    f"threshold {calibration.threshold:.0f} "
+                    f"(n_filled={calibration.n_filled}, n_blank={calibration.n_unfilled})"
+                )
+                for s in scans:
+                    scanning.reclassify_with_calibration(s, calibration)
+            else:
+                logging.warning(
+                    "Calibration skipped — not enough first-pass labels to learn "
+                    f"a filled/blank boundary (n_filled={calibration.n_filled}, "
+                    f"n_blank={calibration.n_unfilled}). Falling back to per-row threshold."
+                )
+
             if answer_key is None:
                 answer_key = extract_answer_key_from_scans(scans)
                 if answer_key is None:

@@ -122,7 +122,7 @@ The result of scanning one page. Attributes:
 | `question_brightness` | dict `q → np.ndarray(5)` per-bubble darkness samples |
 | `answers` | dict `q → list[int]` of selected option indices (0=A … 4=E) |
 | `confidence` | dict `q → float` (gap between sorted bubble brightnesses) |
-| `flags` | list of strings such as `unreadable`, `no_matric`, `no_answer:7`, `multi_answer:12`, `low_confidence:33`, `duplicate_matric:51234567` |
+| `flags` | list of strings such as `unreadable`, `no_matric`, `multi_answer:12`, `low_confidence:33`, `duplicate_matric:51234567`. Genuinely-blank rows are *not* flagged — the calibration step lets them score high-confidence-blank. |
 | `one_answer_only`, `num_questions` | the options the scan was run with |
 
 Helpers: `bubble_rect(q, opt)` and `matric_bubble_rect(digit, pos)` return
@@ -130,23 +130,69 @@ Helpers: `bubble_rect(q, opt)` and `matric_bubble_rect(digit, pos)` return
 for click hit-testing. `toggle_answer(q, opt)` and `set_matric_digit(pos, v)`
 mutate the scan; the GUI calls these from click handlers.
 
-### Scan pipeline (`scanning.scan_page`)
+### Scan pipeline
 
-`scan_page(image, page_index, **opts) -> PageScan`
+Two passes:
+
+**Pass 1 — per-page detection (`scanning.scan_page`).**
 
 1. `prepare_image` — rotates the page to portrait, deskews using Hough lines,
    then locates the 44 black registration bars by binarising the image and
    scanning vertically. A short threshold sweep (127, 100, 150, 80, 170) and
    a 180-degree rotation fallback are tried before giving up. On failure the
    page comes back flagged `unreadable` rather than aborting.
-2. `scan_matriculation` — samples the 8 × 10 matric grid; per-position
-   confidence is the gap between the darkest and second-darkest digit.
-3. For each question 1..N, `scan_question` samples the 5 option bubbles and
-   `_detect_question_answers` thresholds them at 80 % of the row's max
-   brightness (with a one-answer-only mode that takes the single darkest).
-4. Per-question confidence is the largest gap between sorted bubble
-   brightnesses, normalised by the row's max — low values mean the bubbles
-   are too uniform to be sure.
+2. `scan_matriculation` — samples the 8 × 10 matric grid.
+3. For each question 1..N, `scan_question` samples the 5 option bubbles. The
+   first pass labels filled vs blank using a per-row relative threshold
+   (80 % of the row's max brightness). This produces a working answer set
+   even before calibration; its job is to seed the calibration step.
+
+**Pass 2 — cohort calibration (`scanning.calibrate_from_scans` /
+`reclassify_with_calibration`).**
+
+After every page has been scanned, the worker pools every bubble's
+brightness across the whole batch, partitioned by the first-pass label.
+The medians of the two populations bound a single absolute decision
+boundary at their midpoint.
+
+The final answer detection is the **union** of:
+
+- the cohort-absolute test (bubbles darker than the boundary), and
+- the first-pass per-row test (already on the `PageScan`).
+
+The union preserves the original pipeline's recall on faint marks (which
+sit above the absolute threshold but stand out in their row) while
+benefiting from absolute detection on rows the relative threshold would
+miss (uniform-fill or all-blank rows). On the 20-page sample, the new
+pipeline matches the old code's detections exactly except for one
+additional (genuine) faint-mark catch.
+
+The matric block is intentionally **not** reclassified with the cohort
+threshold. The matric uses different sampling geometry, and the old
+per-column relative test (the darkest digit per column wins, but only if
+it's at least 10 % darker than the brightest) handles uniformly-dark
+matric blocks correctly — every column fails the ratio test and the
+matric reads as unset, which is what we want for pages where the student
+didn't fill in their ID.
+
+Per-question confidence becomes the **margin from the boundary** (in units
+of half the filled/blank spread), taken as the minimum across the row's
+bubbles. With this metric:
+
+- A clearly blank row scores ~1 (every bubble far above the threshold).
+- A clearly answered row scores ~0.5–1 (the filled bubble is far below,
+  the blanks far above; the closest-to-boundary bubble drives the score).
+- Only genuinely ambiguous rows — bubbles near the threshold — score low.
+
+The "needs review" filter keys off `confidence < 0.3`. On the 20-page
+sample bundled in `examples/`, calibration cuts the flag count from
+~3700 (mostly false alarms on legitimately-blank rows) to ~80, while
+matching the old pipeline on every matric read and every answer
+detection.
+
+If the cohort is too small or too uniform for calibration to fit
+(`Calibration.valid == False`), the GUI falls back to first-pass labels
+and logs a warning.
 
 ### Results pipeline (`dataframes`)
 

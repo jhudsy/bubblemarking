@@ -36,6 +36,33 @@ ANSWER_KEY_MATRIC = "00000000"
 
 
 @dataclass
+class Calibration:
+    """Cohort-wide bubble-brightness calibration.
+
+    Built from first-pass scan results across every page in the batch. ``filled``
+    bubbles (per the relative threshold) form one population, ``unfilled`` ones
+    the other; the decision boundary sits at the midpoint of the medians and
+    confidence is reported as the bubble's distance from that boundary,
+    normalised by half the spread (so confidence ≥ 1 means the bubble lands
+    on or past one of the medians)."""
+    filled_median: float = 0.0
+    unfilled_median: float = 0.0
+    threshold: float = 0.0
+    spread: float = 0.0
+    n_filled: int = 0
+    n_unfilled: int = 0
+    valid: bool = False
+
+    def is_filled(self, brightness: float) -> bool:
+        return brightness < self.threshold
+
+    def margin(self, brightness: float) -> float:
+        if self.spread <= 0:
+            return 0.0
+        return float(abs(brightness - self.threshold) / (self.spread / 2.0))
+
+
+@dataclass
 class PageScan:
     """All data extracted from a single scanned page, plus geometry for editing."""
     page_index: int
@@ -55,7 +82,10 @@ class PageScan:
 
     @property
     def unreadable(self) -> bool:
-        return self.prepared_image is None or self.bars is None
+        # ``prepared_image`` is intentionally dropped after scanning to bound
+        # memory; the GUI re-renders on demand. ``bars`` is the durable
+        # signal that geometry was successfully extracted.
+        return self.bars is None
 
     def matric_string(self) -> str:
         if any(d is None for d in self.matric_digits):
@@ -267,13 +297,14 @@ def matric_bubble_rect(bars, matric_right_cache, digit_value, position, **kwargs
 ###############################################################################
 # Bubble brightness sampling
 ###############################################################################
-def _sample_window(image, x1, y1, x2, y2, red_threshold):
+def _sample_window(image, x1, y1, x2, y2, red_threshold, erode=True):
     window = image[y1:y2, x1:x2].copy()
     if window.size == 0:
         return 0
     window = window[:, :, 0]
     window = cv2.threshold(window, red_threshold, 255, cv2.THRESH_BINARY)[1]
-    window = cv2.erode(window, np.ones([3, 3]), iterations=2)
+    if erode:
+        window = cv2.erode(window, np.ones([3, 3]), iterations=2)
     return int(np.sum(window))
 
 
@@ -338,6 +369,15 @@ def scan_matriculation(image, bars, matric_right_cache, **kwargs):
     For each position (column) the darkest bubble across the 10 digit rows
     wins, provided it is at least 10% darker than the brightest. Confidence
     is the normalised gap between the darkest and second-darkest digit.
+    The relative-per-column test gracefully rejects pages where the whole
+    matric block is uniformly dark (e.g. unfilled but with paper noise) —
+    every column fails the ratio test and the matric reads as unset.
+
+    Erosion is intentionally skipped here: the matric uses different sampling
+    geometry than the answer block, and erosion makes uniform-dark blocks
+    look like clean detections. Without it the brightness matrix reflects
+    the raw thresholded mark area, which is what the per-column ratio test
+    was tuned for in the original pipeline.
 
     Returns ``(digits, brightness_matrix, confidence_per_position, cache)``,
     where ``digits`` is a list of 8 ints or ``None`` when no digit was
@@ -355,7 +395,7 @@ def scan_matriculation(image, bars, matric_right_cache, **kwargs):
             if rect is None:
                 continue
             x1, y1, x2, y2 = rect
-            brightness[digit, pos] = _sample_window(image, x1, y1, x2, y2, red_threshold)
+            brightness[digit, pos] = _sample_window(image, x1, y1, x2, y2, red_threshold, erode=False)
 
     digits = []
     confidence = []
@@ -426,3 +466,86 @@ def scan_page(image, page_index=0, **kwargs):
 def answers_to_string(answers):
     """Convert [0,2,4] -> 'A,C,E'."""
     return ",".join(chr(65 + a) for a in sorted(answers))
+
+
+###############################################################################
+# Cohort calibration
+###############################################################################
+def calibrate_from_scans(scans, min_filled: int = 5, min_unfilled: int = 50) -> Calibration:
+    """Pool first-pass bubble brightnesses across the batch and learn where
+    "filled" and "blank" actually sit for this cohort's pencil + scanner combo.
+
+    The decision boundary in :class:`Calibration` is the midpoint between the
+    two medians; bubbles darker than that threshold are filled. Returns a
+    :class:`Calibration` with ``valid=False`` if either population is too
+    small or the medians have not separated."""
+    filled = []
+    unfilled = []
+    for s in scans:
+        if s.unreadable:
+            continue
+        for q, br in s.question_brightness.items():
+            if br is None:
+                continue
+            ans = set(s.answers.get(q, []))
+            for opt, b in enumerate(br):
+                (filled if opt in ans else unfilled).append(float(b))
+
+    if len(filled) < min_filled or len(unfilled) < min_unfilled:
+        return Calibration(n_filled=len(filled), n_unfilled=len(unfilled), valid=False)
+
+    fmed = float(np.median(filled))
+    umed = float(np.median(unfilled))
+    if umed - fmed < 1.0:
+        return Calibration(filled_median=fmed, unfilled_median=umed,
+                           n_filled=len(filled), n_unfilled=len(unfilled), valid=False)
+
+    return Calibration(
+        filled_median=fmed,
+        unfilled_median=umed,
+        threshold=(fmed + umed) / 2.0,
+        spread=umed - fmed,
+        n_filled=len(filled),
+        n_unfilled=len(unfilled),
+        valid=True,
+    )
+
+
+def reclassify_with_calibration(scan: PageScan, calibration: Calibration):
+    """Refine answer detection using the cohort-wide threshold and rewrite
+    confidence as margin-from-boundary.
+
+    The detection rule is the **union** of two signals:
+
+    * Cohort calibration: bubbles darker than the cohort threshold are filled.
+    * First-pass relative: bubbles already labelled filled by the per-row
+      0.8-of-max heuristic that ran during the page scan.
+
+    The union preserves the old pipeline's recall on faint marks (which sit
+    above the absolute threshold but stand out within their row) while
+    benefiting from absolute detection on rows the relative threshold would
+    miss (uniform-fill or all-blank rows).
+
+    Confidence is the minimum bubble margin from the cohort boundary,
+    normalised by half the filled/blank spread. Bubbles near the boundary
+    drag confidence down even when the union still picks them — the GUI's
+    review filter catches them as ``low_confidence``.
+
+    The matric block is intentionally **not** reclassified here. Its
+    per-column relative test already handles uniform-dark blocks correctly
+    (every column fails the ratio test, matric reads as unset), and the
+    cohort threshold from answer bubbles doesn't generalise to the matric
+    sampling geometry."""
+    if not calibration.valid or scan.unreadable:
+        return
+    for q, br in scan.question_brightness.items():
+        if br is None:
+            continue
+        cal_ans = {i for i, b in enumerate(br) if calibration.is_filled(float(b))}
+        first_pass = set(scan.answers.get(q, []))
+        ans = sorted(cal_ans | first_pass)
+        if scan.one_answer_only and len(ans) > 1:
+            ans = [int(np.argmin(br))]
+        scan.answers[q] = ans
+        margins = [calibration.margin(float(b)) for b in br]
+        scan.confidence[q] = float(min(margins)) if margins else 0.0
