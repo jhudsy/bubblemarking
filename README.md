@@ -151,7 +151,7 @@ The result of scanning one page. Attributes:
 | `question_brightness` | dict `q → np.ndarray(5)` per-bubble darkness samples |
 | `answers` | dict `q → list[int]` of selected option indices (0=A … 4=E) |
 | `confidence` | dict `q → float` (gap between sorted bubble brightnesses) |
-| `flags` | list of strings such as `unreadable`, `no_matric`, `multi_answer:12`, `low_confidence:33`, `duplicate_matric:51234567`. Genuinely-blank rows are *not* flagged — the calibration step lets them score high-confidence-blank. |
+| `flags` | list of strings: `unreadable`, `no_matric`, `multi_answer:12`, `low_confidence:33`, `duplicate_matric:51234567`, `no_answer:7`. The `no_answer` flag only appears when an answer key is loaded and that question is in-scope (the key has a correct answer for it) — out-of-scope questions on a 120-row form for a 30-question exam are *not* flagged. |
 | `one_answer_only`, `num_questions` | the options the scan was run with |
 
 Helpers: `bubble_rect(q, opt)` and `matric_bubble_rect(digit, pos)` return

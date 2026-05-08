@@ -47,16 +47,21 @@ def numpy_rgb_to_qpixmap(arr: np.ndarray) -> QtGui.QPixmap:
     return QtGui.QPixmap.fromImage(qimg)
 
 
-def recompute_flags(scan: PageScan, low_conf_threshold: float = 0.15):
+def recompute_flags(scan: PageScan, low_conf_threshold: float = 0.15,
+                    answer_key=None):
     """Rebuild the flag list for a scan from its current state. Called after
     edits so that resolved problems clear themselves from the review queue.
 
     With cohort calibration, ``confidence`` is the bubble margin from the
     decision boundary, normalised by half the filled/blank spread. Values
     near 0 mean a bubble landed on the boundary; values ≥ 1 mean it's at
-    or past one of the medians. We only flag ``low_confidence`` — blank
-    rows are no longer surfaced as ``no_answer`` since they're now
-    high-confidence-blank, not ambiguous."""
+    or past one of the medians.
+
+    When an ``answer_key`` is supplied, questions that the key marks as
+    in-scope (i.e. have a correct answer) but where the student selected
+    nothing get a ``no_answer:N`` flag — those are likely "the student
+    forgot" rather than "intentionally blank." Out-of-scope questions
+    (the form has 120 rows, the exam may use only 30) are not flagged."""
     flags = []
     if scan.unreadable:
         flags.append("unreadable")
@@ -64,13 +69,24 @@ def recompute_flags(scan: PageScan, low_conf_threshold: float = 0.15):
         return
     if scan.matric_string() == UNREAD_MATRIC:
         flags.append("no_matric")
+    is_answer_key_page = scan.matric_string() == ANSWER_KEY_MATRIC
     for q in range(1, scan.num_questions + 1):
         ans = scan.answers.get(q, [])
         if scan.one_answer_only and len(ans) > 1:
             flags.append(f"multi_answer:{q}")
         if scan.confidence.get(q, 1.0) < low_conf_threshold:
             flags.append(f"low_confidence:{q}")
+        if (answer_key is not None and not is_answer_key_page
+                and not ans and answer_key.correct_for(q)):
+            flags.append(f"no_answer:{q}")
     scan.flags = flags
+
+
+def _format_q_list(qs):
+    qs = sorted(qs)
+    if len(qs) <= 8:
+        return ", ".join(str(q) for q in qs)
+    return ", ".join(str(q) for q in qs[:6]) + f" and {len(qs) - 6} more"
 
 
 def friendly_issue_summary(scan):
@@ -78,10 +94,12 @@ def friendly_issue_summary(scan):
     Empty list means the page has no problems to surface."""
     if not scan.flags:
         return []
-    low_conf = sorted({int(f.split(":", 1)[1]) for f in scan.flags
-                       if f.startswith("low_confidence:")})
-    multi = sorted({int(f.split(":", 1)[1]) for f in scan.flags
-                    if f.startswith("multi_answer:")})
+    low_conf = {int(f.split(":", 1)[1]) for f in scan.flags
+                if f.startswith("low_confidence:")}
+    multi = {int(f.split(":", 1)[1]) for f in scan.flags
+             if f.startswith("multi_answer:")}
+    no_answer = {int(f.split(":", 1)[1]) for f in scan.flags
+                 if f.startswith("no_answer:")}
     duplicates = [f.split(":", 1)[1] for f in scan.flags
                   if f.startswith("duplicate_matric:")]
 
@@ -92,15 +110,16 @@ def friendly_issue_summary(scan):
         lines.append("Matriculation number could not be read.")
     for matric in duplicates:
         lines.append(f"Same matric ({matric}) appears on another page.")
+    if no_answer:
+        qs = _format_q_list(no_answer)
+        lines.append(f"No answer where one is expected: question {qs}." if len(no_answer) == 1
+                     else f"No answer where one is expected: questions {qs}.")
     if low_conf:
-        if len(low_conf) <= 8:
-            qs = ", ".join(str(q) for q in low_conf)
-        else:
-            qs = ", ".join(str(q) for q in low_conf[:6]) + f" and {len(low_conf) - 6} more"
+        qs = _format_q_list(low_conf)
         lines.append(f"Worth a glance: question {qs}." if len(low_conf) == 1
                      else f"Worth a glance: questions {qs}.")
     if multi:
-        qs = ", ".join(str(q) for q in multi)
+        qs = _format_q_list(multi)
         lines.append(f"Multiple answers selected: question {qs}." if len(multi) == 1
                      else f"Multiple answers selected: questions {qs}.")
     return lines
@@ -969,7 +988,7 @@ class ReviewWidget(QtWidgets.QWidget):
         self.low_conf_threshold = threshold
         self.review_slider_label.setText(f"Flag sensitivity: {value}%")
         for s in self.scans:
-            recompute_flags(s, threshold)
+            recompute_flags(s, threshold, self.answer_key)
         recompute_duplicate_flags(self.scans)
         self._refresh_list()
         if 0 <= self.current_scan_index < len(self.scans):
@@ -1011,7 +1030,7 @@ class ReviewWidget(QtWidgets.QWidget):
             current = scan.matric_digits[i2]
             scan.set_matric_digit(i2, None if current == i1 else i1)
             recompute_duplicate_flags(self.scans)
-        recompute_flags(scan, self.low_conf_threshold)
+        recompute_flags(scan, self.low_conf_threshold, self.answer_key)
         # Refresh overlays in place so the user's zoom/pan is preserved.
         self.page_view.refresh_overlays_for(scan_idx)
         if scan_idx == self.current_scan_index:
@@ -1050,7 +1069,7 @@ class ReviewWidget(QtWidgets.QWidget):
             self.matric_edit.setText(scan.matric_string())
             return
         scan.matric_digits = [int(c) for c in text]
-        recompute_flags(scan, self.low_conf_threshold)
+        recompute_flags(scan, self.low_conf_threshold, self.answer_key)
         recompute_duplicate_flags(self.scans)
         # duplicate change can affect siblings — refresh list (labels) and
         # the current page's overlays (matric outline).

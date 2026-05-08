@@ -136,7 +136,7 @@ class ScanWorker(QtCore.QObject):
                     )
 
             for s in scans:
-                recompute_flags(s)
+                recompute_flags(s, answer_key=answer_key)
             recompute_duplicate_flags(scans)
 
             self.finished.emit(scans, answer_key, doc)
