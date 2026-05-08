@@ -56,14 +56,27 @@ class ScanWorker(QtCore.QObject):
         try:
             answer_key: Optional[AnswerKey] = None
             num_questions = None
-            if not self.answer_in_scan:
+            if self.answer_in_scan:
+                logging.info(
+                    "Answer key source: looking for a sheet with matric 00000000 in the scan."
+                )
+                if self.answer_path:
+                    logging.warning(
+                        f"Ignoring '{self.answer_path}' because "
+                        '"Read the answer key from the scan" is ticked.'
+                    )
+            else:
                 if not self.answer_path:
                     self.failed.emit("No answer file selected.")
                     return
                 try:
                     answer_key = read_answer_key_from_file(self.answer_path)
                     num_questions = answer_key.num_questions
-                    logging.info(f"Loaded answer key with {num_questions} questions")
+                    logging.info(
+                        f"Answer key source: loaded {num_questions} questions "
+                        f"from '{self.answer_path}'. Pages will only be scanned "
+                        f"up to question {num_questions}."
+                    )
                 except Exception as exc:
                     self.failed.emit(f"Could not read answer file: {exc}")
                     return
@@ -189,12 +202,14 @@ class AppMainWindow(QtCore.QObject):
 
         # Answer-in-scan checkbox
         self.AnswerInFileCheckbox = QtWidgets.QCheckBox(
-            "Answer key is in the scan (matric 00000000)"
+            "Read the answer key from the scan (matric 00000000)"
         )
         self.AnswerInFileCheckbox.setChecked(True)
         self.AnswerInFileCheckbox.setToolTip(
-            "Leave ticked if a tutor has bubbled the key onto a sheet using\n"
-            "matriculation 00000000. Untick to load a separate CSV/XLSX key."
+            "Tick this when a tutor has bubbled the key onto a sheet using\n"
+            "matriculation 00000000 — the scanner picks it up automatically.\n"
+            "Untick (or pick a file below) to use a separate CSV/XLSX key.\n"
+            "When ticked, any file you select below is ignored."
         )
         form.addRow("", self.AnswerInFileCheckbox)
 
@@ -410,6 +425,16 @@ class AppMainWindow(QtCore.QObject):
         if f:
             self.AnswerFileName.setText(f)
             self._settings.setValue("last_answer_path", f)
+            # If the user explicitly picked a key file, that's the one they
+            # want to use — untick "Answer key is in the scan" so the worker
+            # actually reads the file (instead of looking for a 00000000
+            # matric page that may not exist).
+            if self.AnswerInFileCheckbox.isChecked():
+                self.AnswerInFileCheckbox.setChecked(False)
+                logging.info(
+                    'Unticked "Answer key is in the scan" — the picked file '
+                    'will be used as the key.'
+                )
 
     # --- scan flow
     def run_scan(self):
