@@ -19,6 +19,10 @@ from bubblemarking.gui.review import (
 )
 
 
+SETTINGS_ORG = "bubblemarking"
+SETTINGS_APP = "bubblemarking"
+
+
 class WriteLogToWidgetHandler(logging.Handler):
     def __init__(self, widget):
         super().__init__()
@@ -289,6 +293,104 @@ class AppMainWindow(QtCore.QObject):
         self._worker: Optional[ScanWorker] = None
         self._doc = None
 
+        # ---- Persisted settings ----
+        # Settings get loaded after every input is connected so handlers see
+        # the restored state. Saves happen on every user-driven change so
+        # there's no need to hook a save on quit.
+        self._settings = QtCore.QSettings(SETTINGS_ORG, SETTINGS_APP)
+        self._load_settings()
+        self._connect_settings_writes()
+
+    # ----------------------------------------------------------- settings
+    def _load_settings(self):
+        s = self._settings
+        # Bool keys.
+        self.OneAnswerCheckbox.setChecked(
+            s.value("one_answer_only", False, type=bool)
+        )
+        self.AnswerInFileCheckbox.setChecked(
+            s.value("answer_in_scan", True, type=bool)
+        )
+        self.review.show_correct_check.setChecked(
+            s.value("show_correct_answers", True, type=bool)
+        )
+        # Float keys.
+        thr = float(s.value("low_conf_threshold", 0.15))
+        thr = max(0.0, min(1.0, thr))
+        self.review.review_slider.setValue(int(round(thr * 100)))
+        # Scoring strategy + its options.
+        wanted_name = s.value("scoring_strategy", type=str)
+        if wanted_name:
+            for i in range(self.scoring_panel.combo.count()):
+                if self.scoring_panel.combo.itemText(i) == wanted_name:
+                    self.scoring_panel.combo.setCurrentIndex(i)
+                    break
+        # Per-strategy option values stored under "scoring_options/<name>/<key>".
+        active = self.scoring_panel.strategy()
+        if active is not None:
+            self._restore_strategy_options(active)
+        # Last scan/answer file paths — restored but not auto-loaded.
+        self.ScanFileName.setText(s.value("last_scan_path", "", type=str))
+        self.AnswerFileName.setText(s.value("last_answer_path", "", type=str))
+
+    def _restore_strategy_options(self, strategy):
+        s = self._settings
+        prefix = f"scoring_options/{strategy.NAME}/"
+        for name, widget in self.scoring_panel._option_widgets.items():
+            key = prefix + name
+            if not s.contains(key):
+                continue
+            value = s.value(key)
+            if isinstance(widget, QtWidgets.QCheckBox):
+                widget.setChecked(
+                    value if isinstance(value, bool)
+                    else str(value).lower() in ("1", "true", "yes", "on")
+                )
+            elif isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                try:
+                    widget.setValue(type(widget.value())(float(value)))
+                except (ValueError, TypeError):
+                    pass
+            elif isinstance(widget, QtWidgets.QLineEdit):
+                widget.setText(str(value))
+
+    def _connect_settings_writes(self):
+        s = self._settings
+        self.OneAnswerCheckbox.toggled.connect(
+            lambda v: s.setValue("one_answer_only", bool(v))
+        )
+        self.AnswerInFileCheckbox.toggled.connect(
+            lambda v: s.setValue("answer_in_scan", bool(v))
+        )
+        self.review.show_correct_check.toggled.connect(
+            lambda v: s.setValue("show_correct_answers", bool(v))
+        )
+        self.review.review_slider.valueChanged.connect(
+            lambda v: s.setValue("low_conf_threshold", v / 100.0)
+        )
+        self.scoring_panel.changed.connect(self._save_scoring_state)
+        self.ScanFileName.editingFinished.connect(
+            lambda: s.setValue("last_scan_path", self.ScanFileName.text())
+        )
+        self.AnswerFileName.editingFinished.connect(
+            lambda: s.setValue("last_answer_path", self.AnswerFileName.text())
+        )
+
+    def _save_scoring_state(self):
+        s = self._settings
+        active = self.scoring_panel.strategy()
+        if active is None:
+            return
+        s.setValue("scoring_strategy", active.NAME)
+        prefix = f"scoring_options/{active.NAME}/"
+        for name, widget in self.scoring_panel._option_widgets.items():
+            if isinstance(widget, QtWidgets.QCheckBox):
+                s.setValue(prefix + name, widget.isChecked())
+            elif isinstance(widget, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                s.setValue(prefix + name, widget.value())
+            elif isinstance(widget, QtWidgets.QLineEdit):
+                s.setValue(prefix + name, widget.text())
+
     # --- file pickers
     def select_scan_file(self):
         logging.info("Opening scan file picker…")
@@ -297,6 +399,7 @@ class AppMainWindow(QtCore.QObject):
         )
         if f:
             self.ScanFileName.setText(f)
+            self._settings.setValue("last_scan_path", f)
 
     def select_answer_file(self):
         logging.info("Opening answer file picker…")
@@ -306,6 +409,7 @@ class AppMainWindow(QtCore.QObject):
         )
         if f:
             self.AnswerFileName.setText(f)
+            self._settings.setValue("last_answer_path", f)
 
     # --- scan flow
     def run_scan(self):
@@ -374,6 +478,11 @@ class AppMainWindow(QtCore.QObject):
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    # Set the organisation / application identifiers so QSettings stores
+    # preferences in the platform-native location without the noisy
+    # "QSettings: name not specified" warnings.
+    app.setOrganizationName(SETTINGS_ORG)
+    app.setApplicationName(SETTINGS_APP)
     window = QtWidgets.QMainWindow()
     AppMainWindow(window)
     window.resize(1100, 750)

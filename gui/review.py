@@ -1,11 +1,17 @@
 """Interactive page-review widget. After scanning, students' answers can be
 inspected and corrected by clicking bubbles directly on the page image."""
 import logging
+import sys
 from typing import Optional
 
 import cv2
 import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
+
+
+# Platform-appropriate label for the zoom modifier — Cmd on macOS, Ctrl
+# elsewhere. Used in tooltip / hint text shown to the user.
+ZOOM_KEY_LABEL = "⌘" if sys.platform == "darwin" else "Ctrl"
 
 from bubblemarking import scanning, scoring
 from bubblemarking.dataframes import (
@@ -196,6 +202,8 @@ class PageImageView(QtWidgets.QGraphicsView):
         self._active_index = -1
         self._suppress_active_signal = False
         self._show_correct_answers = True
+        self._last_tooltip_key = None
+        self.setMouseTracking(True)
         self.setRenderHints(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse)
         self.setResizeAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorViewCenter)
@@ -220,6 +228,8 @@ class PageImageView(QtWidgets.QGraphicsView):
         self._image_cache = image_cache
         self._low_conf_threshold = low_conf_threshold
         if not scans:
+            placeholder = self._scene.addText("No pages found in this PDF.")
+            placeholder.setDefaultTextColor(QtGui.QColor(220, 220, 220))
             return
 
         # Resolve a canonical page size from the first available rendered
@@ -469,6 +479,35 @@ class PageImageView(QtWidgets.QGraphicsView):
                         best = ("matric", digit, pos)
         return best
 
+    def mouseMoveEvent(self, event):
+        # Show a confidence tooltip when hovering over an answer bubble.
+        # Cheap: only re-emit when the (page, question) under the cursor
+        # actually changes.
+        if self._blocks:
+            sp = self.mapToScene(event.position().toPoint())
+            for block in self._blocks:
+                if block.bounds.contains(sp):
+                    local_x = sp.x() - block.bounds.x()
+                    local_y = sp.y() - block.bounds.y()
+                    hit = self._hit_test_in_scan(block.scan, local_x, local_y)
+                    if hit and hit[0] == "answer":
+                        key = (block.scan_index, hit[1])
+                        if key != self._last_tooltip_key:
+                            conf = block.scan.confidence.get(hit[1], 0.0)
+                            QtWidgets.QToolTip.showText(
+                                event.globalPosition().toPoint(),
+                                f"Q{hit[1]} confidence: {conf:.2f}\n"
+                                "(0 = on the boundary, 1 = clearly classified)",
+                                self,
+                            )
+                            self._last_tooltip_key = key
+                        return super().mouseMoveEvent(event)
+                    break
+        if self._last_tooltip_key is not None:
+            QtWidgets.QToolTip.hideText()
+            self._last_tooltip_key = None
+        super().mouseMoveEvent(event)
+
     def mousePressEvent(self, event):
         if event.button() != QtCore.Qt.MouseButton.LeftButton or not self._blocks:
             return super().mousePressEvent(event)
@@ -684,7 +723,29 @@ class ReviewWidget(QtWidgets.QWidget):
         self.low_conf_threshold = 0.15
         self.scoring_panel = scoring_panel
         self._build_ui()
+        self._install_shortcuts()
         self.scoring_panel.changed.connect(self._on_scoring_changed)
+
+    def _install_shortcuts(self):
+        """Keyboard shortcuts for fast triage. Use ``ApplicationShortcut`` so
+        they fire on the Review tab regardless of which sub-widget has focus,
+        but don't override text-input keys (the matric field consumes its
+        own keystrokes before the shortcut sees them)."""
+        bindings = [
+            ("J", lambda: self._navigate(1)),
+            ("K", lambda: self._navigate(-1)),
+            ("N", self._jump_to_next_review),
+            ("F", self._toggle_review_filter),
+        ]
+        for key, slot in bindings:
+            sc = QtGui.QShortcut(QtGui.QKeySequence(key), self)
+            sc.setContext(QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(slot)
+
+    def _toggle_review_filter(self):
+        self.filter_combo.setCurrentIndex(
+            (self.filter_combo.currentIndex() + 1) % self.filter_combo.count()
+        )
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
@@ -802,14 +863,15 @@ class ReviewWidget(QtWidgets.QWidget):
         next_review = QtWidgets.QPushButton("Next page needing review")
         next_review.setToolTip(
             "Jump to the next page that has any issue to check, wrapping\n"
-            "around the cohort if necessary."
+            "around the cohort if necessary. (shortcut: N)"
         )
         next_review.clicked.connect(self._jump_to_next_review)
         rl.addWidget(next_review)
 
         rl.addWidget(QtWidgets.QLabel(
-            "<i>Click bubbles to toggle.\n"
-            "⌘+scroll or pinch zooms; '0' fits to window.</i>"
+            f"<i>Click bubbles to toggle.\n"
+            f"{ZOOM_KEY_LABEL}+scroll or pinch zooms; '0' fits to window.\n"
+            f"J/K next/previous page · N next-needing-review · F toggle filter.</i>"
         ))
         rl.addStretch(1)
         root.addWidget(right, 0)

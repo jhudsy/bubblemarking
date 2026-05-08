@@ -213,9 +213,22 @@ def find_black_bars(orig_image, **kwargs):
             if cur_height > min_bar_height:
                 blackBars.append((top - 1, i + 7))
 
-    if len(blackBars) != num_black_bars:
-        return None
-    return blackBars
+    if len(blackBars) == num_black_bars:
+        return blackBars
+    # Soft fallback: if a stray dot, fold, or smudge created one or two extra
+    # dark runs, drop the shortest until we hit the expected count. Limit how
+    # far we'll stretch (don't accept wildly wrong page geometry).
+    if num_black_bars < len(blackBars) <= num_black_bars + 4:
+        # Sort by run height, longest first; keep the top ``num_black_bars``,
+        # then re-sort by y-position to preserve top-to-bottom order.
+        ranked = sorted(blackBars, key=lambda b: b[1] - b[0], reverse=True)
+        kept = sorted(ranked[:num_black_bars], key=lambda b: b[0])
+        logging.info(
+            f"find_black_bars: dropped {len(blackBars) - num_black_bars} short "
+            f"extras to recover the expected {num_black_bars}-bar grid."
+        )
+        return kept
+    return None
 
 
 def prepare_image(image, **kwargs):
@@ -308,6 +321,30 @@ def _sample_window(image, x1, y1, x2, y2, red_threshold, erode=True):
     return int(np.sum(window))
 
 
+def _sample_darkest_in_roi(image, cx_low, cx_high, cy_low, cy_high,
+                            red_threshold, erode=True,
+                            search_radius=8, step=4):
+    """Sample the canonical bubble window AND a few nearby offsets, returning
+    the darkest (smallest) brightness found. Robust to small registration
+    drift between cohort and the hardcoded bubble offsets without losing
+    the per-window erosion behaviour.
+
+    The search box is intentionally tight (radius < half the inter-bubble
+    spacing) to avoid a neighbour's dark pixels leaking into the score."""
+    best = _sample_window(image, cx_low, cy_low, cx_high, cy_high,
+                          red_threshold, erode=erode)
+    for dx in range(-search_radius, search_radius + 1, step):
+        for dy in range(-search_radius, search_radius + 1, step):
+            if dx == 0 and dy == 0:
+                continue
+            v = _sample_window(image, cx_low + dx, cy_low + dy,
+                               cx_high + dx, cy_high + dy,
+                               red_threshold, erode=erode)
+            if v < best:
+                best = v
+    return best
+
+
 def question_confidence(brightness):
     """Return 0..1 — high when the largest gap between sorted bubble brightnesses
     is wide compared to the maximum brightness. Ambiguous pages (all bubbles
@@ -357,7 +394,9 @@ def scan_question(image, bars, right_bar_cache, question, **kwargs):
         if rect is None:
             continue
         x1, y1, x2, y2 = rect
-        brightness[opt] = _sample_window(image, x1, y1, x2, y2, red_threshold)
+        brightness[opt] = _sample_darkest_in_roi(
+            image, x1, x2, y1, y2, red_threshold,
+        )
 
     answers = _detect_question_answers(brightness, threshold, one_answer_only)
     return answers, brightness, right_bar_cache

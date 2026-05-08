@@ -38,19 +38,32 @@ The GUI is the only entry point — there is no longer a CLI.
 4. **Editing.** Click a bubble (answer or matric digit) to toggle it. Edits
    preserve your zoom and pan — the click no longer snaps the view. Type
    directly into the matric field for fast keyboard entry.
-5. **Zoom and pan.** `⌘ + scroll` (or pinch on a trackpad) zooms in around
-   the cursor. `0` fits the current page to the window. Bare scroll/swipe
-   moves vertically through the document.
-6. **View toggles.**
+5. **Zoom and pan.** `⌘ + scroll` (or pinch on a trackpad; `Ctrl + scroll`
+   on Linux/Windows) zooms in around the cursor. `0` fits the current page
+   to the window. Bare scroll/swipe moves vertically through the document.
+6. **Keyboard shortcuts** (active anywhere on the Review tab except inside
+   the matric edit field):
+   - `J` / `K` — jump to next / previous page in the list.
+   - `N` — jump to the next page that has issues to check (wraps).
+   - `F` — toggle the page list between "All pages" and "Needs review only".
+7. **View toggles.**
    - **Show correct answers** — turns the red "correct answer" outlines on
      and off.
    - **Flag sensitivity** slider — controls how aggressively pages are
      flagged for review. Drag left for a quieter queue, right for more
      coverage. Updates live across every loaded page.
-7. **Export.** Click **Export results CSV…** in the bottom-left. The CSV
+   - **Hover** any answer bubble to see the calibrated confidence for that
+     question (0 = on the boundary, 1 = clearly classified).
+8. **Export.** Click **Export results CSV…** in the bottom-left. The CSV
    contains one row per student with `QuestionN{NumCorrect, NumIncorrect,
    Answer, Weight}` columns and a `Total` column when a strategy is
    selected; row 0 is the answer key.
+
+The Setup tab's options (single-answer warning, key-in-scan checkbox,
+scoring strategy and its values, flag sensitivity) and the Review tab's
+"Show correct answers" toggle are persisted between runs via the
+platform-native settings store, so a typical workflow is "click Scan,
+verify the few flags, export" without re-configuring anything.
 
 ## Answer file format
 
@@ -278,4 +291,20 @@ intentionally pure: no I/O, no global state, easy to unit-test.
 The Setup form is built programmatically in `gui/main.py` (the legacy
 `gui.ui` / `gui.py` pair has been retired) — change widget layout, labels,
 and tooltips directly in code there.
+
+## Tests
+
+The package ships with a pytest suite covering the answer-key and results
+layer, scoring strategies, calibration math, and the friendly-summary
+helper. Run them from the repo root with:
+
+```
+pip install pytest
+PYTHONPATH=.. pytest tests/
+```
+
+A separate `tests/test_e2e.py` exercises the full scan → calibrate →
+export pipeline against the bundled `examples/scan_*.pdf` if it's
+present (and skips automatically when it isn't, since the bundled PDFs
+contain real student data and aren't committed).
 
