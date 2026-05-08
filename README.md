@@ -16,25 +16,41 @@ The GUI is the only entry point — there is no longer a CLI.
 ## Workflow
 
 1. **Setup tab** — pick a scan PDF and (optionally) an answer-key file. Tick
-   "Answers in scan file" if the key is bubbled in by a tutor on a sheet with
-   matriculation `00000000`. Tick "Warn if there is more than one answer per
-   question" for single-answer exams.
+   "Answer key is in the scan" if the key is bubbled in by a tutor on a sheet
+   with matriculation `00000000`. Tick "Warn if more than one answer per
+   question" for single-answer exams. Below the Scan button, configure the
+   **Scoring** strategy that will apply to every student in this batch.
 2. Click **Scan and review**. Pages are processed one at a time; progress is
-   logged into the text area. Pages that the scanner is unsure about get
-   flagged for human review.
+   logged into the text area. After every page is scanned, the system
+   calibrates against the cohort and re-classifies all bubbles using an
+   absolute filled/blank threshold learned from this batch's pencil and
+   scanner combo.
 3. **Review tab** opens automatically when scanning finishes:
-   - Left: list of pages. Use the dropdown to show only pages that need review
-     (unreadable page, missing matric, duplicate matric, low confidence,
-     missing/multi answer).
-   - Centre: the page image with overlay rectangles. Click a bubble to toggle
-     selection; click a matric digit to set or clear it. Green = selected;
-     red outline = correct answer (when the key is loaded); amber row =
-     low-confidence detection.
-     - `Ctrl + scroll` zoom, `0` fit to window.
-   - Right: matric editor, flag list, navigation, "Next page needing review".
-4. When the list is clean, click **Export results CSV…**. The CSV contains
-   one row per student with `QuestionN{NumCorrect,NumIncorrect,Answer}`
-   columns; row 0 is the answer key.
+   - **Left:** list of pages. Use the dropdown to show all pages or only
+     those needing review. Click any entry to jump to that page.
+   - **Centre:** every page laid out vertically — scroll with the mouse
+     wheel or trackpad to move continuously through the cohort. The page
+     closest to the viewport centre becomes the "active" page, and the left
+     list highlights it automatically. Pages outside a small window around
+     the active page render as cheap placeholders to keep memory bounded.
+   - **Right:** matric editor, friendly issue list ("Worth a glance:
+     question 12, 33."), live score, view options, navigation.
+4. **Editing.** Click a bubble (answer or matric digit) to toggle it. Edits
+   preserve your zoom and pan — the click no longer snaps the view. Type
+   directly into the matric field for fast keyboard entry.
+5. **Zoom and pan.** `⌘ + scroll` (or pinch on a trackpad) zooms in around
+   the cursor. `0` fits the current page to the window. Bare scroll/swipe
+   moves vertically through the document.
+6. **View toggles.**
+   - **Show correct answers** — turns the red "correct answer" outlines on
+     and off.
+   - **Flag sensitivity** slider — controls how aggressively pages are
+     flagged for review. Drag left for a quieter queue, right for more
+     coverage. Updates live across every loaded page.
+7. **Export.** Click **Export results CSV…** in the bottom-left. The CSV
+   contains one row per student with `QuestionN{NumCorrect, NumIncorrect,
+   Answer, Weight}` columns and a `Total` column when a strategy is
+   selected; row 0 is the answer key.
 
 ## Answer file format
 
@@ -56,10 +72,11 @@ weights are ignored (treated as default).
 ## Scoring
 
 A scoring strategy turns a student's selections into a numeric score per
-question. The Review tab has a **Scoring** panel above the export button
-where you pick a strategy and tweak its options; the score for the
-currently visible page updates live, so you can sanity-check the rule on a
-real student before exporting.
+question. The **Setup tab** has a Scoring panel below the Scan button
+where you pick a strategy and tweak its options. On the Review tab, the
+right-hand side panel shows the live score for whichever page is
+currently centred in the view — so you can sanity-check the rule on real
+students as you scroll.
 
 Three built-ins ship with the package:
 
@@ -104,9 +121,8 @@ scoring/               — pluggable scoring strategies
   all_or_nothing.py
   partial_credit.py
   negative_marking.py
-gui/main.py            — main window, scan worker thread
-gui/review.py          — Review tab + ScoringPanel
-gui/gui.py             — generated from gui.ui (do not hand-edit)
+gui/main.py            — main window, Setup tab, scan worker thread
+gui/review.py          — Review tab, vertical multi-page view, ScoringPanel
 ```
 
 ### `scanning.PageScan`
@@ -212,16 +228,33 @@ and logs a warning.
 
 ### Review GUI (`gui/review.py`)
 
-- `PageImageView` is a `QGraphicsView` that paints the prepared page plus
-  bubble overlays into a single pixmap and keeps a list of bubble rectangles
-  for hit-testing. Left-click finds the smallest enclosing bubble rect and
-  emits `bubble_clicked(kind, i1, i2)`; the parent updates the `PageScan`
-  and asks the view to redraw.
+- `PageImageView` is a `QGraphicsView` showing every page in the cohort
+  laid out vertically in one scene. Each page is a `PageBlock` slot whose
+  pixmap is either a cheap "Page N" placeholder or a fully-rendered page
+  with overlays. The active page (whichever one is closest to the viewport
+  centre) plus ±`LOAD_WINDOW` neighbours are kept rendered; pages outside
+  that window revert to placeholders so memory stays bounded regardless
+  of cohort size. Scrolling the view updates the active page (debounced,
+  drives the left-list selection); editing a page (bubble click or matric
+  type) re-renders only that page's overlays so the user's zoom and pan
+  are preserved.
+- Left-click finds the smallest enclosing bubble rect and emits
+  `bubble_clicked(scan_index, kind, i1, i2)`; the parent updates the
+  `PageScan` and asks the view to redraw that page only.
+- ⌘ + scroll, pinch gestures, and the `0` key all work as expected; bare
+  scroll moves through the document; clicks never reset zoom.
+- `set_show_correct_answers(bool)` and `set_low_conf_threshold(float)`
+  are how the right-pane "Show correct answers" checkbox and the
+  "Flag sensitivity" slider drive overlay re-renders across every loaded
+  page.
 - `PageImageCache` is a 4-page LRU. It re-renders + re-prepares pages on
   demand from the original `PdfDocument`. After scanning, each `PageScan`
   has its `prepared_image` cleared so the cohort fits comfortably in memory.
-- `recompute_flags(scan)` and `recompute_duplicate_flags(scans)` rebuild the
-  flag set after each edit so resolved problems disappear from the queue.
+- `friendly_issue_summary(scan)` translates raw `flag` strings into the
+  plain-English bullets shown in the side panel's "Issues to check" box.
+- `recompute_flags(scan)` and `recompute_duplicate_flags(scans)` rebuild
+  the flag set after each edit (or every slider movement) so resolved
+  problems disappear from the queue.
 
 ### Scoring strategies (`scoring/`)
 
@@ -242,13 +275,7 @@ intentionally pure: no I/O, no global state, easy to unit-test.
 
 ### Editing the Setup form
 
-The Setup form lives in `gui.ui`. Regenerate `gui.py` after changes:
-
-```
-pyside6-uic -o gui.py gui.ui
-```
-
-`gui/main.py` reparents the generated form into a `QTabWidget` at runtime
-and hides obsolete widgets, so changes to `gui.ui` don't have to track the
-runtime restructure.
+The Setup form is built programmatically in `gui/main.py` (the legacy
+`gui.ui` / `gui.py` pair has been retired) — change widget layout, labels,
+and tooltips directly in code there.
 

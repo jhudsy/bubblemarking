@@ -10,10 +10,10 @@ from bubblemarking.dataframes import (
     extract_answer_key_from_scans,
     read_answer_key_from_file,
 )
-from bubblemarking.gui.gui import Ui_MainWindow
 from bubblemarking.gui.review import (
     PageImageCache,
     ReviewWidget,
+    ScoringPanel,
     recompute_duplicate_flags,
     recompute_flags,
 )
@@ -141,69 +141,149 @@ class ScanWorker(QtCore.QObject):
             self.failed.emit(str(exc))
 
 
-class AppMainWindow(Ui_MainWindow):
+class AppMainWindow(QtCore.QObject):
+    """The main window: a QTabWidget with a Setup tab (built from scratch
+    here) and the interactive Review tab.
+
+    Inherits ``QObject`` so the slots wired up to the cross-thread
+    ``ScanWorker`` signals run on the main (GUI) thread — without that,
+    macOS aborts when a ``QMessageBox`` is constructed from the worker."""
+
     def __init__(self, window):
-        self.setupUi(window)
+        super().__init__(window)
         self._main_window = window
         window.setWindowTitle("MCQ Scanning")
 
-        # Hide widgets we no longer use. Output is chosen at export time on
-        # the Review tab; the marked-PDF output has been replaced by the
-        # interactive viewer.
-        for w in (
-            self.OutputFileLabel,
-            self.OutputFileName,
-            self.OutputFileSelectButton,
-            self.SaveImageFileCheckbox,
-            self.ImageFileLabel,
-            self.ImageFileName,
-            self.ImageFileSelectButton,
-        ):
-            w.hide()
-
-        # Repurpose the central layout: wrap the existing setup form inside a
-        # QTabWidget so we can add a Review tab alongside it.
-        old_central = window.centralWidget()
-        tabs = QtWidgets.QTabWidget(window)
-
-        # The existing widgets live inside `old_central` already laid out via
-        # geometry. We re-parent the form to a Setup tab and re-parent the log
-        # text area below it.
+        # ---- Setup tab (fresh widgets, not from gui.ui) ----
         setup_tab = QtWidgets.QWidget()
-        setup_layout = QtWidgets.QVBoxLayout(setup_tab)
-        self.layoutWidget.setParent(setup_tab)
-        setup_layout.addWidget(self.layoutWidget)
-        self.OutputTextArea.setParent(setup_tab)
-        setup_layout.addWidget(self.OutputTextArea, 1)
-        self.ClearOutputButton.setParent(setup_tab)
-        setup_layout.addWidget(self.ClearOutputButton)
-        # Reset geometry-based positioning that the .ui file inflicted on us.
-        for w in (self.layoutWidget, self.OutputTextArea, self.ClearOutputButton):
-            w.setGeometry(QtCore.QRect())
-        tabs.addTab(setup_tab, "Setup")
+        setup_v = QtWidgets.QVBoxLayout(setup_tab)
 
-        # Review tab
-        self.review = ReviewWidget()
+        form = QtWidgets.QFormLayout()
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+
+        # Scan file
+        scan_row = QtWidgets.QHBoxLayout()
+        self.ScanFileName = QtWidgets.QLineEdit()
+        self.ScanFileName.setToolTip("Path to the scanned PDF.")
+        self.ScanFileSelectButton = QtWidgets.QPushButton("Select…")
+        self.ScanFileSelectButton.setToolTip(
+            "Pick the PDF of scanned answer sheets. One page per student."
+        )
+        scan_row.addWidget(self.ScanFileName, 1)
+        scan_row.addWidget(self.ScanFileSelectButton)
+        form.addRow("Scan PDF:", scan_row)
+
+        # One-answer-only checkbox
+        self.OneAnswerCheckbox = QtWidgets.QCheckBox(
+            "Warn if more than one answer per question"
+        )
+        self.OneAnswerCheckbox.setToolTip(
+            "Tick for single-answer exams. Rows where the scanner detects more\n"
+            "than one filled bubble will be flagged for review."
+        )
+        form.addRow("", self.OneAnswerCheckbox)
+
+        # Answer-in-scan checkbox
+        self.AnswerInFileCheckbox = QtWidgets.QCheckBox(
+            "Answer key is in the scan (matric 00000000)"
+        )
+        self.AnswerInFileCheckbox.setChecked(True)
+        self.AnswerInFileCheckbox.setToolTip(
+            "Leave ticked if a tutor has bubbled the key onto a sheet using\n"
+            "matriculation 00000000. Untick to load a separate CSV/XLSX key."
+        )
+        form.addRow("", self.AnswerInFileCheckbox)
+
+        # Answer file
+        ans_row = QtWidgets.QHBoxLayout()
+        self.AnswerFileName = QtWidgets.QLineEdit()
+        self.AnswerFileName.setToolTip("Path to the answer key file.")
+        self.AnswerFileSelectButton = QtWidgets.QPushButton("Select…")
+        self.AnswerFileSelectButton.setToolTip(
+            "Pick a CSV or XLSX answer key.\n"
+            "Columns: question number, comma-separated correct letters,\n"
+            "optional question weight."
+        )
+        ans_row.addWidget(self.AnswerFileName, 1)
+        ans_row.addWidget(self.AnswerFileSelectButton)
+        self.AnswerFileLabel = QtWidgets.QLabel("Answer file:")
+        form.addRow(self.AnswerFileLabel, ans_row)
+
+        # The answer file row is meaningful only when the key is NOT in the scan.
+        def _toggle_answer_row(checked: bool):
+            self.AnswerFileName.setEnabled(not checked)
+            self.AnswerFileSelectButton.setEnabled(not checked)
+            self.AnswerFileLabel.setEnabled(not checked)
+        _toggle_answer_row(self.AnswerInFileCheckbox.isChecked())
+        self.AnswerInFileCheckbox.toggled.connect(_toggle_answer_row)
+
+        # Wrap the form so it stays at sane width and aligned left.
+        form_holder = QtWidgets.QWidget()
+        form_holder.setLayout(form)
+        form_holder.setMaximumWidth(700)
+        form_row = QtWidgets.QHBoxLayout()
+        form_row.addWidget(form_holder)
+        form_row.addStretch(1)
+        setup_v.addLayout(form_row)
+
+        self.ScanButton = QtWidgets.QPushButton("Scan and review")
+        self.ScanButton.setToolTip(
+            "Begin scanning every page in the PDF. The Review tab opens\n"
+            "automatically when scanning finishes."
+        )
+        setup_v.addWidget(self.ScanButton)
+
+        # Scoring strategy lives on the Setup tab — it applies to every
+        # student in the cohort, so it makes sense to configure it once
+        # before scanning. The Review tab reads from this same panel.
+        self.scoring_panel = ScoringPanel()
+        scoring_row = QtWidgets.QHBoxLayout()
+        scoring_holder = QtWidgets.QWidget()
+        scoring_holder.setLayout(QtWidgets.QVBoxLayout())
+        scoring_holder.layout().setContentsMargins(0, 0, 0, 0)
+        scoring_holder.layout().addWidget(self.scoring_panel)
+        scoring_holder.setMaximumWidth(700)
+        scoring_row.addWidget(scoring_holder)
+        scoring_row.addStretch(1)
+        setup_v.addLayout(scoring_row)
+
+        # Log text area
+        self.OutputTextArea = QtWidgets.QTextBrowser()
+        setup_v.addWidget(self.OutputTextArea, 1)
+
+        self.ClearOutputButton = QtWidgets.QPushButton("Clear output")
+        self.ClearOutputButton.setToolTip("Clear the log above.")
+        self.ClearOutputButton.clicked.connect(self.OutputTextArea.clear)
+        setup_v.addWidget(self.ClearOutputButton)
+
+        # ---- Review tab ----
+        self.review = ReviewWidget(scoring_panel=self.scoring_panel)
         self.review.exported.connect(self._on_exported)
-        tabs.addTab(self.review, "Review and export")
-        tabs.setTabEnabled(1, False)
 
-        self.tabs = tabs
-        window.setCentralWidget(tabs)
+        # ---- Tabs ----
+        self.tabs = QtWidgets.QTabWidget()
+        self.tabs.addTab(setup_tab, "Setup")
+        self.tabs.addTab(self.review, "Review and export")
+        self.tabs.setTabEnabled(1, False)
+        window.setCentralWidget(self.tabs)
 
-        # Hooks
+        # Menubar (native on macOS so it appears at the top of the screen).
+        window.menuBar().setNativeMenuBar(True)
+
+        # ---- Signals ----
         self.ScanFileSelectButton.clicked.connect(self.select_scan_file)
         self.AnswerFileSelectButton.clicked.connect(self.select_answer_file)
         self.ScanButton.clicked.connect(self.run_scan)
-        self.ScanButton.setText("Scan and review")
 
-        self.menubar.setNativeMenuBar(True)
-
+        # ---- Logging ----
         logger = logging.getLogger()
         logger.setLevel(logging.INFO)
-        handler = WriteLogToWidgetHandler(widget=self.OutputTextArea)
-        handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
-        logger.addHandler(handler)
+        widget_handler = WriteLogToWidgetHandler(widget=self.OutputTextArea)
+        widget_handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+        logger.addHandler(widget_handler)
+        stream = logging.StreamHandler()
+        stream.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
+        logger.addHandler(stream)
 
         self._scan_thread: Optional[QtCore.QThread] = None
         self._worker: Optional[ScanWorker] = None
@@ -211,16 +291,18 @@ class AppMainWindow(Ui_MainWindow):
 
     # --- file pickers
     def select_scan_file(self):
+        logging.info("Opening scan file picker…")
         f, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self._main_window, "Select scan", filter="PDF files (*.pdf)"
+            None, "Select scan", "", "PDF files (*.pdf)"
         )
         if f:
             self.ScanFileName.setText(f)
 
     def select_answer_file(self):
+        logging.info("Opening answer file picker…")
         f, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self._main_window, "Select answer key",
-            filter="Answer key (*.csv *.xlsx);;CSV (*.csv);;XLSX (*.xlsx)",
+            None, "Select answer key", "",
+            "Answer key (*.csv *.xlsx);;CSV (*.csv);;XLSX (*.xlsx)",
         )
         if f:
             self.AnswerFileName.setText(f)

@@ -41,7 +41,7 @@ def numpy_rgb_to_qpixmap(arr: np.ndarray) -> QtGui.QPixmap:
     return QtGui.QPixmap.fromImage(qimg)
 
 
-def recompute_flags(scan: PageScan, low_conf_threshold: float = 0.3):
+def recompute_flags(scan: PageScan, low_conf_threshold: float = 0.15):
     """Rebuild the flag list for a scan from its current state. Called after
     edits so that resolved problems clear themselves from the review queue.
 
@@ -65,6 +65,39 @@ def recompute_flags(scan: PageScan, low_conf_threshold: float = 0.3):
         if scan.confidence.get(q, 1.0) < low_conf_threshold:
             flags.append(f"low_confidence:{q}")
     scan.flags = flags
+
+
+def friendly_issue_summary(scan):
+    """Translate raw flag strings into a list of human-readable issue lines.
+    Empty list means the page has no problems to surface."""
+    if not scan.flags:
+        return []
+    low_conf = sorted({int(f.split(":", 1)[1]) for f in scan.flags
+                       if f.startswith("low_confidence:")})
+    multi = sorted({int(f.split(":", 1)[1]) for f in scan.flags
+                    if f.startswith("multi_answer:")})
+    duplicates = [f.split(":", 1)[1] for f in scan.flags
+                  if f.startswith("duplicate_matric:")]
+
+    lines = []
+    if "unreadable" in scan.flags:
+        lines.append("Page geometry could not be detected — manual entry only.")
+    if "no_matric" in scan.flags:
+        lines.append("Matriculation number could not be read.")
+    for matric in duplicates:
+        lines.append(f"Same matric ({matric}) appears on another page.")
+    if low_conf:
+        if len(low_conf) <= 8:
+            qs = ", ".join(str(q) for q in low_conf)
+        else:
+            qs = ", ".join(str(q) for q in low_conf[:6]) + f" and {len(low_conf) - 6} more"
+        lines.append(f"Worth a glance: question {qs}." if len(low_conf) == 1
+                     else f"Worth a glance: questions {qs}.")
+    if multi:
+        qs = ", ".join(str(q) for q in multi)
+        lines.append(f"Multiple answers selected: question {qs}." if len(multi) == 1
+                     else f"Multiple answers selected: questions {qs}.")
+    return lines
 
 
 def recompute_duplicate_flags(scans):
@@ -114,41 +147,256 @@ class PageImageCache:
         self._order.clear()
 
 
+SELECTED_THICKNESS = 7
+KEY_THICKNESS = 5
+LOW_CONF_THICKNESS = 5
+
+DEFAULT_PAGE_SIZE = (2977, 4209)  # A4 portrait at SCALE=5.0
+PAGE_GAP = 60
+LOAD_WINDOW = 2  # pages on either side of the active page kept fully rendered
+
+
+class PageBlock:
+    """One page slot in the multi-page scroll. Starts as a cheap placeholder;
+    swapped to a real rendered pixmap when it's near the viewport."""
+    __slots__ = ("scan_index", "page_index", "scan", "bounds",
+                 "pixmap_item", "is_loaded")
+
+    def __init__(self, scan_index, scan, bounds, pixmap_item):
+        self.scan_index = scan_index
+        self.page_index = scan.page_index
+        self.scan = scan
+        self.bounds = bounds  # QRectF in scene coords
+        self.pixmap_item = pixmap_item
+        self.is_loaded = False
+
+
 class PageImageView(QtWidgets.QGraphicsView):
-    """A QGraphicsView that displays a scanned page and lets the user click
-    bubbles to toggle them. Emits bubble_clicked with (kind, i1, i2):
-        kind == "answer": i1 = question number, i2 = option index
-        kind == "matric": i1 = digit value, i2 = position index
-    """
-    bubble_clicked = QtCore.Signal(str, int, int)
+    """A QGraphicsView that lays out every page in the cohort vertically and
+    streams real page renderings into the visible window. Clicking a bubble
+    on any page emits ``bubble_clicked(scan_index, kind, i1, i2)``; scrolling
+    so a different page becomes the centre emits ``active_page_changed``.
+
+    Page renderings are loaded lazily for ±LOAD_WINDOW pages around the
+    active page. Pages outside that window revert to grey placeholders so
+    memory stays bounded."""
+    bubble_clicked = QtCore.Signal(int, str, int, int)
+    active_page_changed = QtCore.Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._scene = QtWidgets.QGraphicsScene(self)
         self.setScene(self._scene)
-        self._pixmap_item: Optional[QtWidgets.QGraphicsPixmapItem] = None
-        self._hit_targets = []
+        self._blocks: list = []
+        self._answer_key: Optional[AnswerKey] = None
+        self._image_cache: Optional[PageImageCache] = None
+        self._low_conf_threshold = 0.15
+        self._page_w = DEFAULT_PAGE_SIZE[0]
+        self._page_h = DEFAULT_PAGE_SIZE[1]
+        self._active_index = -1
+        self._suppress_active_signal = False
+        self._show_correct_answers = True
         self.setRenderHints(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
         self.setTransformationAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setResizeAnchor(QtWidgets.QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setBackgroundBrush(QtGui.QBrush(QtGui.QColor(40, 40, 40)))
+        self.grabGesture(QtCore.Qt.GestureType.PinchGesture)
+        # Debounce scroll-driven recomputes so smooth scrolling doesn't
+        # hammer the lazy-load logic.
+        self._scroll_timer = QtCore.QTimer(self)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.setInterval(40)
+        self._scroll_timer.timeout.connect(self._on_scroll_settled)
+        self.verticalScrollBar().valueChanged.connect(
+            lambda *_: self._scroll_timer.start()
+        )
 
-    def set_page(self, image, scan: PageScan, answer_key: Optional[AnswerKey], low_conf_threshold=0.3):
+    # ---------------------------------------------------- scene construction
+    def set_pages(self, scans, answer_key, image_cache, low_conf_threshold=0.15):
+        """Rebuild the scene from a list of :class:`PageScan` objects."""
         self._scene.clear()
-        self._hit_targets = []
-        self._pixmap_item = None
-        if image is None:
-            placeholder = self._scene.addText("Page could not be processed — geometry unavailable.")
-            placeholder.setDefaultTextColor(QtGui.QColor(220, 220, 220))
+        self._blocks = []
+        self._answer_key = answer_key
+        self._image_cache = image_cache
+        self._low_conf_threshold = low_conf_threshold
+        if not scans:
             return
 
-        composite = self._draw_overlays(image, scan, answer_key, low_conf_threshold)
-        pixmap = numpy_rgb_to_qpixmap(composite)
-        self._pixmap_item = self._scene.addPixmap(pixmap)
-        self._scene.setSceneRect(QtCore.QRectF(pixmap.rect()))
-        if scan.bars is not None:
-            self._build_hit_targets(scan)
-        self.fitInView(self._pixmap_item, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+        # Resolve a canonical page size from the first available rendered
+        # page; all pages from one PDF render at the same dimensions.
+        size = self._resolve_page_size(scans, image_cache)
+        self._page_w, self._page_h = size
 
+        y = 0.0
+        for idx, scan in enumerate(scans):
+            bounds = QtCore.QRectF(0.0, y, float(self._page_w), float(self._page_h))
+            placeholder = self._make_placeholder_pixmap(self._page_w, self._page_h, scan)
+            item = self._scene.addPixmap(placeholder)
+            item.setPos(0.0, y)
+            self._blocks.append(PageBlock(idx, scan, bounds, item))
+            y += self._page_h + PAGE_GAP
+
+        self._scene.setSceneRect(QtCore.QRectF(0, 0, self._page_w, max(0, y - PAGE_GAP)))
+        self._active_index = 0
+        self._update_loaded_window()
+        # Defer the initial fit until after the viewport gets its real size.
+        QtCore.QTimer.singleShot(0, lambda: self._fit_block(0))
+
+    def _resolve_page_size(self, scans, image_cache):
+        for s in scans:
+            if s.unreadable or image_cache is None:
+                continue
+            try:
+                img = image_cache.get(s.page_index)
+                if img is not None and img.shape[0] > 0:
+                    return img.shape[1], img.shape[0]
+            except Exception:
+                continue
+        return DEFAULT_PAGE_SIZE
+
+    # ------------------------------------------------- placeholders / loaded
+    def _make_placeholder_pixmap(self, w, h, scan: PageScan):
+        pix = QtGui.QPixmap(w, h)
+        pix.fill(QtGui.QColor(60, 60, 60))
+        painter = QtGui.QPainter(pix)
+        painter.setPen(QtGui.QColor(180, 180, 180))
+        font = painter.font()
+        font.setPointSize(48)
+        painter.setFont(font)
+        if scan.unreadable:
+            text = f"Page {scan.page_index + 1}\nGeometry could not be detected"
+        else:
+            text = f"Page {scan.page_index + 1}"
+        painter.drawText(pix.rect(), QtCore.Qt.AlignmentFlag.AlignCenter, text)
+        painter.end()
+        return pix
+
+    def _load_block(self, block: PageBlock):
+        if block.scan.unreadable or self._image_cache is None:
+            return
+        try:
+            img = self._image_cache.get(block.page_index)
+        except Exception as exc:
+            logging.error(f"Failed to render page {block.page_index + 1}: {exc}")
+            return
+        composite = self._draw_overlays(img, block.scan, self._answer_key,
+                                        self._low_conf_threshold)
+        block.pixmap_item.setPixmap(numpy_rgb_to_qpixmap(composite))
+        block.is_loaded = True
+
+    def _unload_block(self, block: PageBlock):
+        block.pixmap_item.setPixmap(
+            self._make_placeholder_pixmap(int(block.bounds.width()),
+                                          int(block.bounds.height()), block.scan)
+        )
+        block.is_loaded = False
+
+    def _update_loaded_window(self):
+        if not self._blocks:
+            return
+        target = set(range(max(0, self._active_index - LOAD_WINDOW),
+                           min(len(self._blocks), self._active_index + LOAD_WINDOW + 1)))
+        for i, block in enumerate(self._blocks):
+            if i in target and not block.is_loaded:
+                self._load_block(block)
+            elif i not in target and block.is_loaded:
+                self._unload_block(block)
+
+    # ------------------------------------------------------------ external API
+    def scroll_to_page(self, scan_index: int, fit: bool = False):
+        """Programmatic scroll. With ``fit=True`` also resets zoom to fit
+        the page; otherwise keeps the current zoom level."""
+        if not (0 <= scan_index < len(self._blocks)):
+            return
+        block = self._blocks[scan_index]
+        self._active_index = scan_index
+        self._update_loaded_window()
+        if fit:
+            self._fit_block(scan_index)
+        else:
+            self.centerOn(block.bounds.center())
+
+    def refresh_overlays_for(self, scan_index: int):
+        """Re-render overlays for one page after an edit. Preserves zoom/pan
+        and the loaded-window state of every other page."""
+        if not (0 <= scan_index < len(self._blocks)):
+            return
+        block = self._blocks[scan_index]
+        if not block.is_loaded:
+            return
+        if block.scan.unreadable or self._image_cache is None:
+            return
+        try:
+            img = self._image_cache.get(block.page_index)
+        except Exception:
+            return
+        composite = self._draw_overlays(img, block.scan, self._answer_key,
+                                        self._low_conf_threshold)
+        block.pixmap_item.setPixmap(numpy_rgb_to_qpixmap(composite))
+
+    def active_index(self) -> int:
+        return self._active_index
+
+    def set_show_correct_answers(self, show: bool):
+        """Toggle the red 'correct answer' outline overlays."""
+        show = bool(show)
+        if show == self._show_correct_answers:
+            return
+        self._show_correct_answers = show
+        self._redraw_all_loaded()
+
+    def set_low_conf_threshold(self, threshold: float):
+        """Update the low-confidence threshold and re-render the amber row
+        outlines on every currently-loaded page."""
+        self._low_conf_threshold = float(threshold)
+        self._redraw_all_loaded()
+
+    def _redraw_all_loaded(self):
+        """Re-render overlays for every currently-loaded page in place.
+        Placeholders are unaffected and pick up new state when they load."""
+        if self._image_cache is None:
+            return
+        for block in self._blocks:
+            if not block.is_loaded or block.scan.unreadable:
+                continue
+            try:
+                img = self._image_cache.get(block.page_index)
+            except Exception:
+                continue
+            composite = self._draw_overlays(img, block.scan, self._answer_key,
+                                            self._low_conf_threshold)
+            block.pixmap_item.setPixmap(numpy_rgb_to_qpixmap(composite))
+
+    # ----------------------------------------------------- scroll / view fit
+    def _fit_block(self, scan_index: int):
+        if not (0 <= scan_index < len(self._blocks)):
+            return
+        block = self._blocks[scan_index]
+        self.resetTransform()
+        self.fitInView(block.bounds, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+
+    def _page_at_viewport_center(self) -> int:
+        if not self._blocks:
+            return -1
+        center = self.mapToScene(self.viewport().rect().center())
+        y = center.y()
+        if y < self._blocks[0].bounds.top():
+            return 0
+        for block in self._blocks:
+            if block.bounds.top() <= y <= block.bounds.bottom() + PAGE_GAP / 2:
+                return block.scan_index
+        return self._blocks[-1].scan_index
+
+    def _on_scroll_settled(self):
+        new_idx = self._page_at_viewport_center()
+        if new_idx == -1 or new_idx == self._active_index:
+            return
+        self._active_index = new_idx
+        self._update_loaded_window()
+        if not self._suppress_active_signal:
+            self.active_page_changed.emit(new_idx)
+
+    # --------------------------------------------------------- overlay paint
     def _draw_overlays(self, image, scan, answer_key, low_conf_threshold):
         out = image.copy()
         if scan.bars is None:
@@ -163,21 +411,20 @@ class PageImageView(QtWidgets.QGraphicsView):
                     continue
                 x1, y1, x2, y2 = rect
                 if opt in selected:
-                    cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_SELECTED, 4)
+                    cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_SELECTED, SELECTED_THICKNESS)
                 else:
                     cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_UNSELECTED, 1)
-                if correct and opt in correct:
-                    cv2.rectangle(out, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), COLOR_KEY, 2)
+                if self._show_correct_answers and correct and opt in correct:
+                    cv2.rectangle(out, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), COLOR_KEY, KEY_THICKNESS)
             if low_conf:
-                # outline the row in amber
                 xs = [scan.bubble_rect(q, o) for o in range(NUM_OPTIONS)]
                 xs = [r for r in xs if r is not None]
                 if xs:
-                    rx1 = min(r[0] for r in xs) - 6
-                    ry1 = min(r[1] for r in xs) - 6
-                    rx2 = max(r[2] for r in xs) + 6
-                    ry2 = max(r[3] for r in xs) + 6
-                    cv2.rectangle(out, (rx1, ry1), (rx2, ry2), COLOR_LOW_CONF, 2)
+                    rx1 = min(r[0] for r in xs) - 8
+                    ry1 = min(r[1] for r in xs) - 8
+                    rx2 = max(r[2] for r in xs) + 8
+                    ry2 = max(r[3] for r in xs) + 8
+                    cv2.rectangle(out, (rx1, ry1), (rx2, ry2), COLOR_LOW_CONF, LOW_CONF_THICKNESS)
 
         for digit in range(10):
             for pos in range(MATRIC_LENGTH):
@@ -186,55 +433,107 @@ class PageImageView(QtWidgets.QGraphicsView):
                     continue
                 x1, y1, x2, y2 = rect
                 if scan.matric_digits[pos] == digit:
-                    cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_SELECTED, 4)
+                    cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_SELECTED, SELECTED_THICKNESS)
                 else:
                     cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_UNSELECTED, 1)
         return out
 
-    def _build_hit_targets(self, scan):
+    def _hit_test_in_scan(self, scan, local_x, local_y):
+        """Find the smallest bubble rect containing the local-coord click,
+        if any. Returns ``(kind, i1, i2)`` or ``None``."""
+        if scan.bars is None:
+            return None
+        best = None
+        best_area = float("inf")
         for q in range(1, scan.num_questions + 1):
             for opt in range(NUM_OPTIONS):
                 rect = scan.bubble_rect(q, opt)
-                if rect is not None:
-                    self._hit_targets.append((rect, "answer", q, opt))
+                if rect is None:
+                    continue
+                x1, y1, x2, y2 = rect
+                if x1 <= local_x <= x2 and y1 <= local_y <= y2:
+                    area = (x2 - x1) * (y2 - y1)
+                    if area < best_area:
+                        best_area = area
+                        best = ("answer", q, opt)
         for digit in range(10):
             for pos in range(MATRIC_LENGTH):
                 rect = scan.matric_bubble_rect(digit, pos)
-                if rect is not None:
-                    self._hit_targets.append((rect, "matric", digit, pos))
+                if rect is None:
+                    continue
+                x1, y1, x2, y2 = rect
+                if x1 <= local_x <= x2 and y1 <= local_y <= y2:
+                    area = (x2 - x1) * (y2 - y1)
+                    if area < best_area:
+                        best_area = area
+                        best = ("matric", digit, pos)
+        return best
 
     def mousePressEvent(self, event):
-        if self._pixmap_item is None or event.button() != QtCore.Qt.MouseButton.LeftButton:
+        if event.button() != QtCore.Qt.MouseButton.LeftButton or not self._blocks:
             return super().mousePressEvent(event)
         sp = self.mapToScene(event.position().toPoint())
-        x, y = sp.x(), sp.y()
-        best = None
-        best_area = float("inf")
-        for rect, kind, i1, i2 in self._hit_targets:
-            x1, y1, x2, y2 = rect
-            if x1 <= x <= x2 and y1 <= y <= y2:
-                area = (x2 - x1) * (y2 - y1)
-                if area < best_area:
-                    best_area = area
-                    best = (kind, i1, i2)
-        if best is not None:
-            self.bubble_clicked.emit(*best)
-            event.accept()
-            return
+        for block in self._blocks:
+            if block.bounds.contains(sp):
+                local_x = sp.x() - block.bounds.x()
+                local_y = sp.y() - block.bounds.y()
+                hit = self._hit_test_in_scan(block.scan, local_x, local_y)
+                if hit is not None:
+                    kind, i1, i2 = hit
+                    self.bubble_clicked.emit(block.scan_index, kind, i1, i2)
+                    event.accept()
+                    return
+                break
         super().mousePressEvent(event)
 
     def wheelEvent(self, event):
-        if event.modifiers() & QtCore.Qt.KeyboardModifier.ControlModifier:
-            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+        # On macOS Qt swaps Ctrl and Cmd by default, so ControlModifier here
+        # corresponds to the physical Cmd key. Accept Meta as well for setups
+        # where the swap is disabled, and on Linux/Windows for the literal
+        # Ctrl key. Trackpad smooth scrolling reports pixelDelta; classic
+        # wheels report angleDelta.
+        mods = event.modifiers()
+        if mods & (QtCore.Qt.KeyboardModifier.ControlModifier
+                   | QtCore.Qt.KeyboardModifier.MetaModifier):
+            pixel_dy = event.pixelDelta().y() if not event.pixelDelta().isNull() else 0
+            angle_dy = event.angleDelta().y()
+            # 1 angle notch == 120 units. We want a per-notch factor near
+            # 1.08 (gentler than the previous 1.15) and pixel-based smooth
+            # zoom that scales with actual scroll distance.
+            if pixel_dy != 0:
+                factor = 1.0 + pixel_dy / 250.0
+            elif angle_dy != 0:
+                factor = 1.0 + angle_dy / 1500.0
+            else:
+                event.accept()
+                return
+            factor = max(0.5, min(2.0, factor))
             self.scale(factor, factor)
             event.accept()
             return
         super().wheelEvent(event)
 
+    def viewportEvent(self, event):
+        if event.type() == QtCore.QEvent.Type.Gesture:
+            return self._handle_gesture(event)
+        return super().viewportEvent(event)
+
+    def _handle_gesture(self, event):
+        pinch = event.gesture(QtCore.Qt.GestureType.PinchGesture)
+        if pinch is None:
+            return False
+        flags = pinch.changeFlags()
+        if flags & QtWidgets.QPinchGesture.ChangeFlag.ScaleFactorChanged:
+            factor = float(pinch.scaleFactor())
+            # Pinch sends frequent small deltas; clamp to keep things gentle.
+            factor = max(0.7, min(1.4, factor))
+            self.scale(factor, factor)
+        event.accept(pinch)
+        return True
+
     def keyPressEvent(self, event):
-        if event.key() == QtCore.Qt.Key.Key_0:
-            if self._pixmap_item is not None:
-                self.fitInView(self._pixmap_item, QtCore.Qt.AspectRatioMode.KeepAspectRatio)
+        if event.key() == QtCore.Qt.Key.Key_0 and self._blocks:
+            self._fit_block(self._active_index if self._active_index >= 0 else 0)
             event.accept()
             return
         super().keyPressEvent(event)
@@ -261,11 +560,20 @@ class ScoringPanel(QtWidgets.QGroupBox):
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("Strategy:"))
         self.combo = QtWidgets.QComboBox()
+        self.combo.setToolTip(
+            "How each question's score is computed. The chosen strategy\n"
+            "applies to every student in the cohort."
+        )
         for s in self._strategies:
             self.combo.addItem(s.NAME, s)
         self.combo.currentIndexChanged.connect(self._on_strategy_changed)
         row.addWidget(self.combo, 1)
         load_btn = QtWidgets.QPushButton("Load custom…")
+        load_btn.setToolTip(
+            "Load a strategy from a Python file. The module must define a\n"
+            "score(selected, correct, weight, num_options, **opts) function\n"
+            "and (optionally) NAME, DESCRIPTION, and OPTIONS metadata."
+        )
         load_btn.clicked.connect(self._load_custom)
         row.addWidget(load_btn)
         layout.addLayout(row)
@@ -359,18 +667,24 @@ class ScoringPanel(QtWidgets.QGroupBox):
 
 
 class ReviewWidget(QtWidgets.QWidget):
-    """The Review tab. Holds the page list, the page view, and the side panel."""
+    """The Review tab. Holds the page list, the page view, and the side panel.
+
+    Scoring is configured on the Setup tab and shared with this widget via
+    the ``scoring_panel`` parameter — both the live per-page total here and
+    the CSV export read from the same panel."""
 
     exported = QtCore.Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, scoring_panel: "ScoringPanel", parent=None):
         super().__init__(parent)
         self.scans = []
         self.answer_key: Optional[AnswerKey] = None
         self.image_cache: Optional[PageImageCache] = None
         self.current_scan_index = -1
-        self.low_conf_threshold = 0.3
+        self.low_conf_threshold = 0.15
+        self.scoring_panel = scoring_panel
         self._build_ui()
+        self.scoring_panel.changed.connect(self._on_scoring_changed)
 
     def _build_ui(self):
         root = QtWidgets.QHBoxLayout(self)
@@ -380,24 +694,40 @@ class ReviewWidget(QtWidgets.QWidget):
         ll = QtWidgets.QVBoxLayout(left)
         self.filter_combo = QtWidgets.QComboBox()
         self.filter_combo.addItems(["All pages", "Needs review only"])
+        self.filter_combo.setToolTip(
+            "All pages: every scanned page in document order.\n"
+            "Needs review only: just the pages with issues to check."
+        )
         self.filter_combo.currentIndexChanged.connect(self._refresh_list)
         ll.addWidget(self.filter_combo)
         self.page_list = QtWidgets.QListWidget()
+        self.page_list.setToolTip(
+            "✓ pages have no issues; ⚠ pages have something to check.\n"
+            "Click any entry to jump to that page."
+        )
         self.page_list.currentRowChanged.connect(self._on_list_row_changed)
         ll.addWidget(self.page_list)
         self.export_button = QtWidgets.QPushButton("Export results CSV…")
+        self.export_button.setToolTip(
+            "Save a CSV with one row per student. Includes per-question\n"
+            "correct/incorrect counts and a Total column when a scoring\n"
+            "strategy is chosen on the Setup tab."
+        )
         self.export_button.clicked.connect(self._on_export)
         self.export_button.setEnabled(False)
         ll.addWidget(self.export_button)
-        root.addWidget(left, 1)
+        left.setMaximumWidth(260)
+        root.addWidget(left, 0)
 
-        # Center: page view
+        # Center: page view (gets the lion's share of the width).
         self.page_view = PageImageView()
         self.page_view.bubble_clicked.connect(self._on_bubble_clicked)
-        root.addWidget(self.page_view, 4)
+        self.page_view.active_page_changed.connect(self._on_active_page_changed)
+        root.addWidget(self.page_view, 1)
 
-        # Right pane
+        # Right pane (kept compact so the page image dominates).
         right = QtWidgets.QWidget()
+        right.setMaximumWidth(280)
         rl = QtWidgets.QVBoxLayout(right)
         rl.addWidget(QtWidgets.QLabel("<b>Page</b>"))
         self.page_label = QtWidgets.QLabel("-")
@@ -407,58 +737,98 @@ class ReviewWidget(QtWidgets.QWidget):
         self.matric_edit = QtWidgets.QLineEdit()
         self.matric_edit.setMaxLength(8)
         self.matric_edit.setPlaceholderText("8 digits")
+        self.matric_edit.setToolTip(
+            "8-digit matric for the current page. You can also click the\n"
+            "matric bubbles directly on the page image."
+        )
         self.matric_edit.editingFinished.connect(self._on_matric_edited)
         rl.addWidget(self.matric_edit)
 
-        rl.addWidget(QtWidgets.QLabel("<b>Confidence (min over questions)</b>"))
-        self.confidence_label = QtWidgets.QLabel("-")
-        rl.addWidget(self.confidence_label)
-
-        rl.addWidget(QtWidgets.QLabel("<b>Flags</b>"))
+        rl.addWidget(QtWidgets.QLabel("<b>Issues to check</b>"))
         self.flags_view = QtWidgets.QPlainTextEdit()
         self.flags_view.setReadOnly(True)
-        self.flags_view.setMaximumHeight(100)
+        self.flags_view.setMaximumHeight(120)
+        self.flags_view.setPlaceholderText("(no issues — looks clean)")
+        self.flags_view.setToolTip(
+            "Things the scanner thinks need a closer look on this page.\n"
+            "Click bubbles in the page image to fix detection mistakes."
+        )
         rl.addWidget(self.flags_view)
 
         rl.addWidget(QtWidgets.QLabel("<b>Score</b>"))
         self.score_label = QtWidgets.QLabel("-")
         self.score_label.setStyleSheet("font-size: 14pt;")
+        self.score_label.setToolTip(
+            "Live score for the current page using the scoring strategy\n"
+            "configured on the Setup tab."
+        )
         rl.addWidget(self.score_label)
 
-        self.scoring_panel = ScoringPanel()
-        self.scoring_panel.changed.connect(self._on_scoring_changed)
-        rl.addWidget(self.scoring_panel)
+        self.show_correct_check = QtWidgets.QCheckBox("Show correct answers")
+        self.show_correct_check.setChecked(True)
+        self.show_correct_check.setToolTip(
+            "When ticked, the correct answers are outlined in red on every\n"
+            "page (only meaningful once an answer key is loaded)."
+        )
+        self.show_correct_check.toggled.connect(self.page_view.set_show_correct_answers)
+        rl.addWidget(self.show_correct_check)
+
+        self.review_slider_label = QtWidgets.QLabel(
+            f"Flag sensitivity: {int(self.low_conf_threshold * 100)}%"
+        )
+        rl.addWidget(self.review_slider_label)
+        self.review_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self.review_slider.setMinimum(0)
+        self.review_slider.setMaximum(100)
+        self.review_slider.setValue(int(self.low_conf_threshold * 100))
+        self.review_slider.setToolTip(
+            "Higher = more questions get flagged for review.\n"
+            "Lower = only the most ambiguous bubbles surface."
+        )
+        self.review_slider.valueChanged.connect(self._on_review_slider_changed)
+        rl.addWidget(self.review_slider)
 
         nav = QtWidgets.QHBoxLayout()
         prev_btn = QtWidgets.QPushButton("◀ Prev")
+        prev_btn.setToolTip("Jump to the previous page in the list.")
         prev_btn.clicked.connect(lambda: self._navigate(-1))
         next_btn = QtWidgets.QPushButton("Next ▶")
+        next_btn.setToolTip("Jump to the next page in the list.")
         next_btn.clicked.connect(lambda: self._navigate(1))
         nav.addWidget(prev_btn)
         nav.addWidget(next_btn)
         rl.addLayout(nav)
 
         next_review = QtWidgets.QPushButton("Next page needing review")
+        next_review.setToolTip(
+            "Jump to the next page that has any issue to check, wrapping\n"
+            "around the cohort if necessary."
+        )
         next_review.clicked.connect(self._jump_to_next_review)
         rl.addWidget(next_review)
 
         rl.addWidget(QtWidgets.QLabel(
-            "<i>Click bubbles to toggle.\nCtrl+wheel zooms; '0' fits page.</i>"
+            "<i>Click bubbles to toggle.\n"
+            "⌘+scroll or pinch zooms; '0' fits to window.</i>"
         ))
         rl.addStretch(1)
-        root.addWidget(right, 1)
+        root.addWidget(right, 0)
 
     # ------------------------------------------------------------------ data
-    def set_data(self, scans, answer_key, image_cache, low_conf_threshold=0.3):
+    def set_data(self, scans, answer_key, image_cache, low_conf_threshold=0.15):
         self.scans = scans
         self.answer_key = answer_key
         self.image_cache = image_cache
         self.low_conf_threshold = low_conf_threshold
         recompute_duplicate_flags(self.scans)
         self.export_button.setEnabled(answer_key is not None)
+        self.page_view.set_pages(scans, answer_key, image_cache, low_conf_threshold)
         self._refresh_list()
         if self.page_list.count():
             self.page_list.setCurrentRow(0)
+            self.current_scan_index = 0
+            if self.scans:
+                self._update_side_panel(self.scans[0])
 
     # ------------------------------------------------------------- list view
     def _list_label(self, scan):
@@ -501,7 +871,15 @@ class ReviewWidget(QtWidgets.QWidget):
         if item is None:
             return
         idx = item.data(QtCore.Qt.ItemDataRole.UserRole)
-        self._show_page(idx)
+        if idx == self.current_scan_index:
+            return
+        # Programmatic scroll. Fitting on list-driven jumps would override
+        # the user's working zoom level, so pass fit=False.
+        self.page_view._suppress_active_signal = True
+        self.page_view.scroll_to_page(idx)
+        self.page_view._suppress_active_signal = False
+        self.current_scan_index = idx
+        self._update_side_panel(self.scans[idx])
 
     def _navigate(self, delta):
         cur = self.page_list.currentRow()
@@ -519,40 +897,52 @@ class ReviewWidget(QtWidgets.QWidget):
         for offset in range(n):
             i = (start + offset) % n
             if self.scans[i].flags:
-                # find list row holding i
                 for row in range(self.page_list.count()):
                     if self.page_list.item(row).data(QtCore.Qt.ItemDataRole.UserRole) == i:
                         self.page_list.setCurrentRow(row)
                         return
 
-    # ------------------------------------------------------------ page view
-    def _show_page(self, scan_idx):
+    def _on_review_slider_changed(self, value):
+        threshold = value / 100.0
+        self.low_conf_threshold = threshold
+        self.review_slider_label.setText(f"Flag sensitivity: {value}%")
+        for s in self.scans:
+            recompute_flags(s, threshold)
+        recompute_duplicate_flags(self.scans)
+        self._refresh_list()
+        if 0 <= self.current_scan_index < len(self.scans):
+            self._update_side_panel(self.scans[self.current_scan_index])
+        self.page_view.set_low_conf_threshold(threshold)
+
+    @QtCore.Slot(int)
+    def _on_active_page_changed(self, scan_idx):
+        """User scrolled the page view; sync the left list and side panel."""
+        if scan_idx == self.current_scan_index:
+            return
         self.current_scan_index = scan_idx
-        scan = self.scans[scan_idx]
-        img = None
-        if not scan.unreadable and self.image_cache is not None:
-            try:
-                img = self.image_cache.get(scan.page_index)
-            except Exception as exc:
-                logging.error(f"Failed to load page {scan.page_index}: {exc}")
-        self.page_view.set_page(img, scan, self.answer_key, self.low_conf_threshold)
+        for row in range(self.page_list.count()):
+            if self.page_list.item(row).data(QtCore.Qt.ItemDataRole.UserRole) == scan_idx:
+                self.page_list.blockSignals(True)
+                self.page_list.setCurrentRow(row)
+                self.page_list.blockSignals(False)
+                break
+        if 0 <= scan_idx < len(self.scans):
+            self._update_side_panel(self.scans[scan_idx])
+
+    def _update_side_panel(self, scan):
         self.page_label.setText(f"{scan.page_index + 1} of {len(self.scans)}")
         self.matric_edit.blockSignals(True)
         self.matric_edit.setText(scan.matric_string())
         self.matric_edit.blockSignals(False)
-        if scan.confidence:
-            mn = min(scan.confidence.values())
-            self.confidence_label.setText(f"{mn:.2f}")
-        else:
-            self.confidence_label.setText("-")
-        self.flags_view.setPlainText("\n".join(scan.flags) if scan.flags else "(none)")
+        issues = friendly_issue_summary(scan)
+        self.flags_view.setPlainText("\n".join(f"• {line}" for line in issues))
         self._refresh_score()
 
     # --------------------------------------------------------------- edits
-    def _on_bubble_clicked(self, kind, i1, i2):
-        if self.current_scan_index < 0:
+    def _on_bubble_clicked(self, scan_idx, kind, i1, i2):
+        if not (0 <= scan_idx < len(self.scans)):
             return
-        scan = self.scans[self.current_scan_index]
+        scan = self.scans[scan_idx]
         if kind == "answer":
             scan.toggle_answer(i1, i2)
         else:  # matric
@@ -560,8 +950,11 @@ class ReviewWidget(QtWidgets.QWidget):
             scan.set_matric_digit(i2, None if current == i1 else i1)
             recompute_duplicate_flags(self.scans)
         recompute_flags(scan, self.low_conf_threshold)
-        self._show_page(self.current_scan_index)
-        self._refresh_list_item(self.current_scan_index)
+        # Refresh overlays in place so the user's zoom/pan is preserved.
+        self.page_view.refresh_overlays_for(scan_idx)
+        if scan_idx == self.current_scan_index:
+            self._update_side_panel(scan)
+        self._refresh_list_item(scan_idx)
 
     def _on_scoring_changed(self):
         self._refresh_score()
@@ -597,9 +990,11 @@ class ReviewWidget(QtWidgets.QWidget):
         scan.matric_digits = [int(c) for c in text]
         recompute_flags(scan, self.low_conf_threshold)
         recompute_duplicate_flags(self.scans)
-        # duplicate change can affect siblings — refresh whole list
+        # duplicate change can affect siblings — refresh list (labels) and
+        # the current page's overlays (matric outline).
         self._refresh_list()
-        self._show_page(self.current_scan_index)
+        self.page_view.refresh_overlays_for(self.current_scan_index)
+        self._update_side_panel(scan)
 
     # --------------------------------------------------------------- export
     def _on_export(self):
