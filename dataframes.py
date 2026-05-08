@@ -180,6 +180,9 @@ def build_output_df(scans, answer_key: AnswerKey, strategy=None,
     seen = set()
     fallback = 99999999
     for s in scans:
+        if getattr(s, "skip_from_export", False):
+            logging.info(f"Skipping page {s.page_index + 1} from export (user-marked).")
+            continue
         matric = s.matric_string()
         if matric == ANSWER_KEY_MATRIC:
             continue

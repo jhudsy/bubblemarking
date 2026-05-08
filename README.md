@@ -46,18 +46,32 @@ The GUI is the only entry point — there is no longer a CLI.
    - `J` / `K` — jump to next / previous page in the list.
    - `N` — jump to the next page that has issues to check (wraps).
    - `F` — toggle the page list between "All pages" and "Needs review only".
+   - `⌘Z` / `⌘⇧Z` (Ctrl on Linux/Windows) — undo / redo any edit
+     (bubble toggle, matric change, skip toggle). Edits made on a
+     different page from the one currently visible scroll into view
+     when you undo so you can see what changed.
 7. **View toggles.**
    - **Show correct answers** — turns the red "correct answer" outlines on
      and off.
+   - **Skip this page from export** — exclude the current page (e.g. a
+     duplicate scan) from the CSV. The page stays visible in the review
+     list with a "SKIPPED FROM EXPORT" watermark so you can change your
+     mind.
    - **Flag sensitivity** slider — controls how aggressively pages are
      flagged for review. Drag left for a quieter queue, right for more
      coverage. Updates live across every loaded page.
    - **Hover** any answer bubble to see the calibrated confidence for that
      question (0 = on the boundary, 1 = clearly classified).
-8. **Export.** Click **Export results CSV…** in the bottom-left. The CSV
+8. **Mid-review safety net.** Every edit is saved to a per-PDF session
+   file under the platform-native data directory. If the app crashes or
+   you quit without exporting, re-running on the same PDF offers to
+   restore your edits on top of a fresh scan. A clean quit *or* a
+   successful CSV export deletes the file.
+9. **Export.** Click **Export results CSV…** in the bottom-left. The CSV
    contains one row per student with `QuestionN{NumCorrect, NumIncorrect,
    Answer, Weight}` columns and a `Total` column when a strategy is
-   selected; row 0 is the answer key.
+   selected; row 0 is the answer key. Pages marked "Skip from export"
+   are omitted.
 
 The Setup tab's options (single-answer warning, key-in-scan checkbox,
 scoring strategy and its values, flag sensitivity) and the Review tab's
@@ -152,6 +166,7 @@ The result of scanning one page. Attributes:
 | `answers` | dict `q → list[int]` of selected option indices (0=A … 4=E) |
 | `confidence` | dict `q → float` (gap between sorted bubble brightnesses) |
 | `flags` | list of strings: `unreadable`, `no_matric`, `multi_answer:12`, `low_confidence:33`, `duplicate_matric:51234567`, `no_answer:7`. The `no_answer` flag only appears when an answer key is loaded and that question is in-scope (the key has a correct answer for it) — out-of-scope questions on a 120-row form for a 30-question exam are *not* flagged. |
+| `skip_from_export` | bool. When True, ``build_output_df`` omits this page. Set via the "Skip this page from export" checkbox; persisted in the mid-review session file. |
 | `one_answer_only`, `num_questions` | the options the scan was run with |
 
 Helpers: `bubble_rect(q, opt)` and `matric_bubble_rect(digit, pos)` return

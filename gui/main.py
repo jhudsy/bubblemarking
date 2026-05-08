@@ -479,7 +479,15 @@ class AppMainWindow(QtCore.QObject):
     def _on_scan_finished(self, scans, answer_key, doc):
         self._doc = doc
         cache = PageImageCache(doc, scale=5.0, maxsize=4)
-        self.review.set_data(scans, answer_key, cache)
+        if self.AnswerInFileCheckbox.isChecked():
+            answer_source = {"type": "in_scan"}
+        else:
+            answer_source = {"type": "file", "path": self.AnswerFileName.text().strip()}
+        self.review.set_data(
+            scans, answer_key, cache,
+            scan_pdf_path=self.ScanFileName.text().strip(),
+            answer_source=answer_source,
+        )
         self.tabs.setTabEnabled(1, True)
         self.tabs.setCurrentIndex(1)
         flagged = sum(1 for s in scans if s.flags)
@@ -509,7 +517,10 @@ def main():
     app.setOrganizationName(SETTINGS_ORG)
     app.setApplicationName(SETTINGS_APP)
     window = QtWidgets.QMainWindow()
-    AppMainWindow(window)
+    ui = AppMainWindow(window)
+    # Clean quit deletes the mid-review session file — only crashes /
+    # force-quits leave one for resume.
+    app.aboutToQuit.connect(ui.review.clear_session)
     window.resize(1100, 750)
     window.show()
     sys.exit(app.exec())

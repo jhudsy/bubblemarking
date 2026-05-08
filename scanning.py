@@ -79,6 +79,7 @@ class PageScan:
     flags: list = field(default_factory=list)
     num_questions: int = DEFAULT_NUM_QUESTIONS
     one_answer_only: bool = False
+    skip_from_export: bool = False
 
     @property
     def unreadable(self) -> bool:

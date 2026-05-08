@@ -1,6 +1,9 @@
 """Interactive page-review widget. After scanning, students' answers can be
 inspected and corrected by clicking bubbles directly on the page image."""
+import hashlib
+import json
 import logging
+import pathlib
 import sys
 from typing import Optional
 
@@ -34,6 +37,8 @@ COLOR_SELECTED = (0, 200, 0)
 COLOR_UNSELECTED = (180, 180, 180)
 COLOR_KEY = (220, 30, 30)
 COLOR_LOW_CONF = (240, 180, 0)
+COLOR_NO_ANSWER = (50, 130, 230)
+COLOR_SKIP_BADGE = (200, 60, 60)
 
 
 def numpy_rgb_to_qpixmap(arr: np.ndarray) -> QtGui.QPixmap:
@@ -123,6 +128,71 @@ def friendly_issue_summary(scan):
         lines.append(f"More than one bubble selected: question {qs}." if len(multi) == 1
                      else f"More than one bubble selected: questions {qs}.")
     return lines
+
+
+class UndoEntry:
+    """One reversible action on a single PageScan."""
+    __slots__ = ("scan_idx", "description", "before", "after")
+
+    def __init__(self, scan_idx, description, before, after):
+        self.scan_idx = scan_idx
+        self.description = description
+        self.before = before
+        self.after = after
+
+
+class UndoManager:
+    """Two-stack undo/redo. Each entry is a snapshot pair for one scan."""
+
+    def __init__(self, max_depth=200):
+        self._undo = []
+        self._redo = []
+        self._max = max_depth
+
+    def push(self, entry: UndoEntry):
+        self._undo.append(entry)
+        if len(self._undo) > self._max:
+            self._undo.pop(0)
+        self._redo.clear()
+
+    def undo(self):
+        if not self._undo:
+            return None
+        e = self._undo.pop()
+        self._redo.append(e)
+        return e
+
+    def redo(self):
+        if not self._redo:
+            return None
+        e = self._redo.pop()
+        self._undo.append(e)
+        return e
+
+    def can_undo(self):
+        return bool(self._undo)
+
+    def can_redo(self):
+        return bool(self._redo)
+
+    def clear(self):
+        self._undo.clear()
+        self._redo.clear()
+
+
+def scan_snapshot(scan):
+    """Capture the user-editable parts of a PageScan for undo / persistence."""
+    return {
+        "matric_digits": list(scan.matric_digits),
+        "answers": {q: list(a) for q, a in scan.answers.items()},
+        "skip_from_export": bool(getattr(scan, "skip_from_export", False)),
+    }
+
+
+def restore_scan_snapshot(scan, snap):
+    scan.matric_digits = list(snap["matric_digits"])
+    scan.answers = {q: list(a) for q, a in snap["answers"].items()}
+    scan.skip_from_export = bool(snap.get("skip_from_export", False))
 
 
 def recompute_duplicate_flags(scans):
@@ -308,6 +378,8 @@ class PageImageView(QtWidgets.QGraphicsView):
         except Exception as exc:
             logging.error(f"Failed to render page {block.page_index + 1}: {exc}")
             return
+        if img is None:
+            return
         composite = self._draw_overlays(img, block.scan, self._answer_key,
                                         self._low_conf_threshold)
         block.pixmap_item.setPixmap(numpy_rgb_to_qpixmap(composite))
@@ -434,6 +506,12 @@ class PageImageView(QtWidgets.QGraphicsView):
             selected = set(scan.answers.get(q, []))
             correct = answer_key.correct_for(q) if answer_key else set()
             low_conf = scan.confidence.get(q, 1.0) < low_conf_threshold
+            # No-answer row: the key has a correct answer for this question
+            # but the student selected nothing. Highlight separately so it
+            # looks different from "ambiguous" (low-confidence) rows.
+            no_answer = (answer_key is not None
+                         and not selected and bool(correct)
+                         and scan.matric_string() != ANSWER_KEY_MATRIC)
             for opt in range(NUM_OPTIONS):
                 rect = scan.bubble_rect(q, opt)
                 if rect is None:
@@ -445,7 +523,7 @@ class PageImageView(QtWidgets.QGraphicsView):
                     cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_UNSELECTED, 1)
                 if self._show_correct_answers and correct and opt in correct:
                     cv2.rectangle(out, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), COLOR_KEY, KEY_THICKNESS)
-            if low_conf:
+            if low_conf or no_answer:
                 xs = [scan.bubble_rect(q, o) for o in range(NUM_OPTIONS)]
                 xs = [r for r in xs if r is not None]
                 if xs:
@@ -453,7 +531,10 @@ class PageImageView(QtWidgets.QGraphicsView):
                     ry1 = min(r[1] for r in xs) - 8
                     rx2 = max(r[2] for r in xs) + 8
                     ry2 = max(r[3] for r in xs) + 8
-                    cv2.rectangle(out, (rx1, ry1), (rx2, ry2), COLOR_LOW_CONF, LOW_CONF_THICKNESS)
+                    # Low-confidence wins if both apply (ambiguity beats
+                    # missing — the user might still want to flip a bubble).
+                    color = COLOR_LOW_CONF if low_conf else COLOR_NO_ANSWER
+                    cv2.rectangle(out, (rx1, ry1), (rx2, ry2), color, LOW_CONF_THICKNESS)
 
         for digit in range(10):
             for pos in range(MATRIC_LENGTH):
@@ -465,6 +546,22 @@ class PageImageView(QtWidgets.QGraphicsView):
                     cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_SELECTED, SELECTED_THICKNESS)
                 else:
                     cv2.rectangle(out, (x1, y1), (x2, y2), COLOR_UNSELECTED, 1)
+
+        if getattr(scan, "skip_from_export", False):
+            # Big "SKIPPED" badge top-right so it's obvious in the multi-page
+            # scroll which pages won't be in the export.
+            text = "SKIPPED FROM EXPORT"
+            font_scale = out.shape[0] / 700
+            thickness = max(2, int(font_scale * 3))
+            (tw, th), _ = cv2.getTextSize(
+                text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+            x = out.shape[1] - tw - 60
+            y = th + 60
+            cv2.rectangle(out, (x - 20, y - th - 20), (x + tw + 20, y + 20),
+                          (255, 230, 230), cv2.FILLED)
+            cv2.putText(out, text, (x, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                        COLOR_SKIP_BADGE, thickness, cv2.LINE_AA)
         return out
 
     def _hit_test_in_scan(self, scan, local_x, local_y):
@@ -741,6 +838,11 @@ class ReviewWidget(QtWidgets.QWidget):
         self.current_scan_index = -1
         self.low_conf_threshold = 0.15
         self.scoring_panel = scoring_panel
+        self._undo = UndoManager()
+        # Session save target (set in set_data when a PDF path is supplied).
+        self._session_path: Optional["pathlib.Path"] = None
+        self._scan_pdf_path: Optional[str] = None
+        self._answer_source: Optional[dict] = None
         self._build_ui()
         self._install_shortcuts()
         self.scoring_panel.changed.connect(self._on_scoring_changed)
@@ -755,9 +857,13 @@ class ReviewWidget(QtWidgets.QWidget):
             ("K", lambda: self._navigate(-1)),
             ("N", self._jump_to_next_review),
             ("F", self._toggle_review_filter),
+            (QtGui.QKeySequence.StandardKey.Undo, self._do_undo),
+            (QtGui.QKeySequence.StandardKey.Redo, self._do_redo),
         ]
         for key, slot in bindings:
-            sc = QtGui.QShortcut(QtGui.QKeySequence(key), self)
+            seq = key if isinstance(key, QtGui.QKeySequence.StandardKey) \
+                else QtGui.QKeySequence(key)
+            sc = QtGui.QShortcut(seq, self)
             sc.setContext(QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
             sc.activated.connect(slot)
 
@@ -853,6 +959,15 @@ class ReviewWidget(QtWidgets.QWidget):
         self.show_correct_check.toggled.connect(self.page_view.set_show_correct_answers)
         rl.addWidget(self.show_correct_check)
 
+        self.skip_check = QtWidgets.QCheckBox("Skip this page from export")
+        self.skip_check.setToolTip(
+            "Tick to exclude the current page from the exported CSV — useful\n"
+            "for duplicate scans or blank sheets. The page stays visible in\n"
+            "the review list with a SKIPPED FROM EXPORT badge."
+        )
+        self.skip_check.toggled.connect(self._on_skip_toggled)
+        rl.addWidget(self.skip_check)
+
         self.review_slider_label = QtWidgets.QLabel(
             f"Flag sensitivity: {int(self.low_conf_threshold * 100)}%"
         )
@@ -900,12 +1015,26 @@ class ReviewWidget(QtWidgets.QWidget):
         root.addWidget(right, 0)
 
     # ------------------------------------------------------------------ data
-    def set_data(self, scans, answer_key, image_cache, low_conf_threshold=0.15):
+    def set_data(self, scans, answer_key, image_cache, low_conf_threshold=0.15,
+                 scan_pdf_path: Optional[str] = None,
+                 answer_source: Optional[dict] = None):
         self.scans = scans
         self.answer_key = answer_key
         self.image_cache = image_cache
         self.low_conf_threshold = low_conf_threshold
+        self._scan_pdf_path = scan_pdf_path
+        self._answer_source = answer_source
+        self._undo.clear()
+
+        # Resolve where this cohort's mid-review state lives (if any) and
+        # offer to resume any saved edits before showing the pages.
+        self._session_path = self._resolve_session_path(scan_pdf_path)
+        if self._session_path is not None and self._session_path.exists():
+            self._maybe_resume_session()
+
         recompute_duplicate_flags(self.scans)
+        for s in self.scans:
+            recompute_flags(s, self.low_conf_threshold, self.answer_key)
         self.export_button.setEnabled(answer_key is not None)
         self.page_view.set_pages(scans, answer_key, image_cache, low_conf_threshold)
         self._refresh_list()
@@ -915,10 +1044,97 @@ class ReviewWidget(QtWidgets.QWidget):
             if self.scans:
                 self._update_side_panel(self.scans[0])
 
+    # --------------------------------------------------------- session state
+    def _session_dir(self) -> pathlib.Path:
+        base = QtCore.QStandardPaths.writableLocation(
+            QtCore.QStandardPaths.StandardLocation.AppDataLocation
+        )
+        path = pathlib.Path(base) / "sessions"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _resolve_session_path(self, scan_pdf_path) -> Optional[pathlib.Path]:
+        if not scan_pdf_path:
+            return None
+        # Hash the absolute path so different cohorts don't collide and the
+        # filename doesn't leak the user's directory layout.
+        digest = hashlib.sha1(scan_pdf_path.encode("utf-8")).hexdigest()[:16]
+        return self._session_dir() / f"{digest}.json"
+
+    def _maybe_resume_session(self):
+        """If a saved session exists for this PDF, ask the user whether to
+        restore it. Called from set_data after a fresh scan completes."""
+        try:
+            payload = json.loads(self._session_path.read_text())
+        except (OSError, ValueError) as exc:
+            logging.warning(f"Could not read session file: {exc}")
+            return
+        n_edits = len(payload.get("scans", []))
+        if not n_edits:
+            return
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Resume previous review?",
+            f"A previous session for this PDF has {n_edits} edited page(s).\n\n"
+            "Restore those edits on top of the fresh scan?",
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._apply_saved_state(payload)
+
+    def _apply_saved_state(self, payload):
+        by_page = {entry["page_index"]: entry for entry in payload.get("scans", [])}
+        applied = 0
+        for scan in self.scans:
+            entry = by_page.get(scan.page_index)
+            if entry is None:
+                continue
+            try:
+                restore_scan_snapshot(scan, entry)
+                applied += 1
+            except Exception as exc:
+                logging.warning(
+                    f"Could not restore page {scan.page_index + 1}: {exc}"
+                )
+        logging.info(f"Restored {applied} edited page(s) from saved session.")
+
+    def _save_session_state(self):
+        """Persist user edits to disk after every change. The file is
+        deleted on a clean quit and after a successful export."""
+        if self._session_path is None:
+            return
+        # Save only pages with non-default state to keep the file small and
+        # to make "no edits → no file" easy to detect.
+        edited = []
+        for scan in self.scans:
+            snap = scan_snapshot(scan)
+            edited.append({"page_index": scan.page_index, **snap})
+        payload = {
+            "scan_pdf": self._scan_pdf_path,
+            "answer_source": self._answer_source,
+            "scans": edited,
+        }
+        try:
+            self._session_path.write_text(json.dumps(payload))
+        except OSError as exc:
+            logging.warning(f"Could not save session: {exc}")
+
+    def clear_session(self):
+        """Remove the on-disk session file. Called on a clean app quit and
+        after a successful export."""
+        if self._session_path is not None and self._session_path.exists():
+            try:
+                self._session_path.unlink()
+            except OSError as exc:
+                logging.warning(f"Could not delete session file: {exc}")
+
     # ------------------------------------------------------------- list view
     def _list_label(self, scan):
         flag_icon = "⚠ " if scan.flags else "✓ "
         suffix = "  (KEY)" if scan.matric_string() == ANSWER_KEY_MATRIC else ""
+        if getattr(scan, "skip_from_export", False):
+            suffix = "  (SKIPPED)" + suffix
         return f"{flag_icon}p{scan.page_index + 1}: {scan.matric_string()}{suffix}"
 
     def _refresh_list(self):
@@ -1021,25 +1237,90 @@ class ReviewWidget(QtWidgets.QWidget):
         self.matric_edit.blockSignals(False)
         issues = friendly_issue_summary(scan)
         self.flags_view.setPlainText("\n".join(f"• {line}" for line in issues))
+        self.skip_check.blockSignals(True)
+        self.skip_check.setChecked(bool(getattr(scan, "skip_from_export", False)))
+        self.skip_check.blockSignals(False)
         self._refresh_score()
 
     # --------------------------------------------------------------- edits
-    def _on_bubble_clicked(self, scan_idx, kind, i1, i2):
+    def _apply_edit(self, scan_idx, mutator, description):
+        """Capture before/after snapshots around ``mutator(scan)`` and push
+        the pair to the undo stack, then update views and persist state.
+
+        ``mutator(scan)`` performs the change in-place; this helper does the
+        rest — flag recomputation, overlay refresh, list label, side panel,
+        session save."""
         if not (0 <= scan_idx < len(self.scans)):
             return
         scan = self.scans[scan_idx]
-        if kind == "answer":
-            scan.toggle_answer(i1, i2)
-        else:  # matric
-            current = scan.matric_digits[i2]
-            scan.set_matric_digit(i2, None if current == i1 else i1)
-            recompute_duplicate_flags(self.scans)
+        before = scan_snapshot(scan)
+        mutator(scan)
+        after = scan_snapshot(scan)
+        if before == after:
+            return  # no-op edit, don't pollute the undo stack
+        self._undo.push(UndoEntry(scan_idx, description, before, after))
+        self._post_edit(scan_idx)
+
+    def _post_edit(self, scan_idx):
+        """Refresh everything that depends on a scan's state. Called after
+        every edit, every undo, and every redo."""
+        scan = self.scans[scan_idx]
         recompute_flags(scan, self.low_conf_threshold, self.answer_key)
-        # Refresh overlays in place so the user's zoom/pan is preserved.
+        recompute_duplicate_flags(self.scans)
         self.page_view.refresh_overlays_for(scan_idx)
         if scan_idx == self.current_scan_index:
             self._update_side_panel(scan)
         self._refresh_list_item(scan_idx)
+        self._save_session_state()
+
+    def _on_bubble_clicked(self, scan_idx, kind, i1, i2):
+        if kind == "answer":
+            self._apply_edit(scan_idx,
+                             lambda s: s.toggle_answer(i1, i2),
+                             f"toggle answer for q{i1}")
+        else:  # matric
+            def mutate(s):
+                current = s.matric_digits[i2]
+                s.set_matric_digit(i2, None if current == i1 else i1)
+            self._apply_edit(scan_idx, mutate, f"matric digit {i2 + 1}")
+
+    def _on_skip_toggled(self, checked: bool):
+        if self.current_scan_index < 0:
+            return
+        scan = self.scans[self.current_scan_index]
+        if scan.skip_from_export == checked:
+            return
+        self._apply_edit(self.current_scan_index,
+                         lambda s: setattr(s, "skip_from_export", checked),
+                         "skip from export" if checked else "include in export")
+
+    def _do_undo(self):
+        e = self._undo.undo()
+        if e is None:
+            return
+        restore_scan_snapshot(self.scans[e.scan_idx], e.before)
+        self._post_edit(e.scan_idx)
+        self._scroll_to_affected_page(e.scan_idx)
+        logging.info(f"Undid: {e.description} (page {e.scan_idx + 1})")
+
+    def _do_redo(self):
+        e = self._undo.redo()
+        if e is None:
+            return
+        restore_scan_snapshot(self.scans[e.scan_idx], e.after)
+        self._post_edit(e.scan_idx)
+        self._scroll_to_affected_page(e.scan_idx)
+        logging.info(f"Redid: {e.description} (page {e.scan_idx + 1})")
+
+    def _scroll_to_affected_page(self, scan_idx):
+        """If undo/redo touched a page that's not currently visible, scroll
+        to it so the user sees what changed."""
+        if scan_idx == self.current_scan_index:
+            return
+        for row in range(self.page_list.count()):
+            if self.page_list.item(row).data(QtCore.Qt.ItemDataRole.UserRole) == scan_idx:
+                self.page_list.setCurrentRow(row)
+                return
 
     def _on_scoring_changed(self):
         self._refresh_score()
@@ -1072,14 +1353,12 @@ class ReviewWidget(QtWidgets.QWidget):
             )
             self.matric_edit.setText(scan.matric_string())
             return
-        scan.matric_digits = [int(c) for c in text]
-        recompute_flags(scan, self.low_conf_threshold, self.answer_key)
-        recompute_duplicate_flags(self.scans)
-        # duplicate change can affect siblings — refresh list (labels) and
-        # the current page's overlays (matric outline).
+        new_digits = [int(c) for c in text]
+        self._apply_edit(self.current_scan_index,
+                         lambda s: s.__setattr__("matric_digits", new_digits),
+                         "edit matric")
+        # duplicate change can affect siblings — refresh whole list labels
         self._refresh_list()
-        self.page_view.refresh_overlays_for(self.current_scan_index)
-        self._update_side_panel(scan)
 
     # --------------------------------------------------------------- export
     def _on_export(self):
@@ -1099,6 +1378,9 @@ class ReviewWidget(QtWidgets.QWidget):
             num_options=NUM_OPTIONS,
         )
         df.to_csv(path, index=False)
+        # Successful export → mid-review state is no longer needed; clear it
+        # so a future re-run of this PDF starts from a clean scan.
+        self.clear_session()
         self.exported.emit(path)
         QtWidgets.QMessageBox.information(
             self, "Exported", f"Saved {len(df)} rows to:\n{path}"
