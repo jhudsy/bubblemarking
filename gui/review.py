@@ -112,16 +112,16 @@ def friendly_issue_summary(scan):
         lines.append(f"Same matric ({matric}) appears on another page.")
     if no_answer:
         qs = _format_q_list(no_answer)
-        lines.append(f"No answer where one is expected: question {qs}." if len(no_answer) == 1
-                     else f"No answer where one is expected: questions {qs}.")
+        lines.append(f"Missing answer (key expects one): question {qs}." if len(no_answer) == 1
+                     else f"Missing answer (key expects one): questions {qs}.")
     if low_conf:
         qs = _format_q_list(low_conf)
-        lines.append(f"Worth a glance: question {qs}." if len(low_conf) == 1
-                     else f"Worth a glance: questions {qs}.")
+        lines.append(f"Possibly unclear answer: question {qs}." if len(low_conf) == 1
+                     else f"Possibly unclear answers: questions {qs}.")
     if multi:
         qs = _format_q_list(multi)
-        lines.append(f"Multiple answers selected: question {qs}." if len(multi) == 1
-                     else f"Multiple answers selected: questions {qs}.")
+        lines.append(f"More than one bubble selected: question {qs}." if len(multi) == 1
+                     else f"More than one bubble selected: questions {qs}.")
     return lines
 
 
@@ -887,11 +887,15 @@ class ReviewWidget(QtWidgets.QWidget):
         next_review.clicked.connect(self._jump_to_next_review)
         rl.addWidget(next_review)
 
-        rl.addWidget(QtWidgets.QLabel(
-            f"<i>Click bubbles to toggle.\n"
-            f"{ZOOM_KEY_LABEL}+scroll or pinch zooms; '0' fits to window.\n"
+        hint = QtWidgets.QLabel(
+            f"<i>Click bubbles to toggle. "
+            f"{ZOOM_KEY_LABEL}+scroll or pinch zooms; '0' fits to window. "
             f"J/K next/previous page · N next-needing-review · F toggle filter.</i>"
-        ))
+        )
+        hint.setWordWrap(True)
+        hint.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred,
+                           QtWidgets.QSizePolicy.Policy.Minimum)
+        rl.addWidget(hint)
         rl.addStretch(1)
         root.addWidget(right, 0)
 

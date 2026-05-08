@@ -150,6 +150,24 @@ def test_reclassify_does_not_salvage_printer_artefact_above_baseline():
     assert scan.answers[1] == []
 
 
+def test_reclassify_salvage_gate_rejects_mid_zone_artefacts():
+    """Bubbles with a clear in-row gap but absolute brightness in the upper
+    half between threshold and blank median (e.g. p5/q37-style scanner
+    noise at ~437k with cohort threshold ~385k and gate ~423k) are
+    rejected. Otherwise spurious detections leak past q28 in shorter
+    exams."""
+    scan = _scan_with_brightness(
+        [[490, 478, 487, 496, 437]],
+        {1: []},
+    )
+    cal = Calibration(filled_median=290, unfilled_median=480,
+                       threshold=385, spread=190,
+                       n_filled=700, n_unfilled=11000, valid=True)
+    reclassify_with_calibration(scan, cal)
+    # Darkest 437 > gate (385 + 0.2 * 190 = 423) so we don't salvage.
+    assert scan.answers[1] == []
+
+
 def test_reclassify_does_not_salvage_uniform_blank_row():
     """All bubbles within ~1-2% of each other → nothing is salvaged."""
     scan = _scan_with_brightness(

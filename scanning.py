@@ -598,7 +598,7 @@ def reclassify_with_calibration(scan: PageScan, calibration: Calibration):
             row_max = float(sorted_b[-1])
             gap = float(sorted_b[1] - sorted_b[0])
             darkest = float(sorted_b[0])
-            absolute_gate = calibration.threshold + 0.3 * calibration.spread
+            absolute_gate = calibration.threshold + 0.2 * calibration.spread
             if (row_max > 0 and gap / row_max >= 0.08
                     and darkest < absolute_gate):
                 ans = [int(np.argmin(br))]

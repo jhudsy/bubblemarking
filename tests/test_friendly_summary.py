@@ -38,10 +38,9 @@ def test_multi_answer_separated_from_low_confidence():
     flags = ["low_confidence:5", "multi_answer:7"]
     lines = friendly_issue_summary(_scan_with_flags(flags))
     assert len(lines) == 2
-    # one mentions "Worth a glance" the other "Multiple answers"
     text = " ".join(lines).lower()
-    assert "worth a glance" in text
-    assert "multiple answers" in text
+    assert "possibly unclear" in text
+    assert "more than one bubble" in text
 
 
 def test_duplicate_matric():
@@ -63,7 +62,7 @@ def test_no_answer_summary():
         ["no_answer:3", "no_answer:7"]))
     assert len(lines) == 1
     assert "3, 7" in lines[0]
-    assert "no answer" in lines[0].lower()
+    assert "missing answer" in lines[0].lower()
 
 
 # ----------------------------------------------------------- no_answer rule
