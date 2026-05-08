@@ -119,6 +119,50 @@ def test_reclassify_union_adds_cohort_only_detections():
     assert scan.answers[1] == [1]
 
 
+def test_reclassify_salvages_clear_outlier_below_blank_baseline():
+    """A faint pencil mark with an in-row gap and absolute brightness on the
+    filled side of midway-to-blank gets salvaged."""
+    # Mimics page 4 q3 from the example: row max ~489, darkest ~395, gap ~63.
+    scan = _scan_with_brightness(
+        [[457, 489, 476, 395, 489]],
+        {1: []},  # first-pass found nothing
+    )
+    cal = Calibration(filled_median=290, unfilled_median=480,
+                       threshold=385, spread=190,
+                       n_filled=700, n_unfilled=11000, valid=True)
+    reclassify_with_calibration(scan, cal)
+    assert scan.answers[1] == [3]  # the salvaged D
+
+
+def test_reclassify_does_not_salvage_printer_artefact_above_baseline():
+    """A bubble with a similar in-row gap but higher absolute brightness
+    (closer to the blank median) is rejected — it's printer noise, not
+    a faint mark."""
+    # Mimics page 1 q91 from the example: row max ~510, darkest ~450, gap ~54.
+    scan = _scan_with_brightness(
+        [[504, 505, 510, 510, 450]],
+        {1: []},
+    )
+    cal = Calibration(filled_median=290, unfilled_median=480,
+                       threshold=385, spread=190,
+                       n_filled=700, n_unfilled=11000, valid=True)
+    reclassify_with_calibration(scan, cal)
+    assert scan.answers[1] == []
+
+
+def test_reclassify_does_not_salvage_uniform_blank_row():
+    """All bubbles within ~1-2% of each other → nothing is salvaged."""
+    scan = _scan_with_brightness(
+        [[500, 504, 502, 500, 503]],
+        {1: []},
+    )
+    cal = Calibration(filled_median=290, unfilled_median=480,
+                       threshold=385, spread=190,
+                       n_filled=700, n_unfilled=11000, valid=True)
+    reclassify_with_calibration(scan, cal)
+    assert scan.answers[1] == []
+
+
 # ----------------------------------------------------------- helpers
 def test_answers_to_string():
     assert answers_to_string([]) == ""

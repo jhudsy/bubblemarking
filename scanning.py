@@ -583,6 +583,26 @@ def reclassify_with_calibration(scan: PageScan, calibration: Calibration):
         cal_ans = {i for i, b in enumerate(br) if calibration.is_filled(float(b))}
         first_pass = set(scan.answers.get(q, []))
         ans = sorted(cal_ans | first_pass)
+
+        # Outlier salvage: if neither pass caught anything but one bubble is
+        # clearly the darkest in its row AND its absolute brightness is on
+        # the filled side of midway between the cohort threshold and the
+        # blank median, propose it. The two gates together separate genuine
+        # faint pencil marks (one bubble visibly darker, in absolute terms
+        # at least somewhat dark) from printer/scanner artefacts (one bubble
+        # ~10% darker than the others but still close to the blank baseline).
+        # The proposed answer is low-margin by definition, so the review
+        # queue surfaces it for one-click confirmation or rejection.
+        if not ans and len(br) >= 2:
+            sorted_b = np.sort(br)
+            row_max = float(sorted_b[-1])
+            gap = float(sorted_b[1] - sorted_b[0])
+            darkest = float(sorted_b[0])
+            absolute_gate = calibration.threshold + 0.3 * calibration.spread
+            if (row_max > 0 and gap / row_max >= 0.08
+                    and darkest < absolute_gate):
+                ans = [int(np.argmin(br))]
+
         if scan.one_answer_only and len(ans) > 1:
             ans = [int(np.argmin(br))]
         scan.answers[q] = ans
