@@ -12,19 +12,20 @@ from bubblemarking.scoring import (
     load_strategy_from_file,
     negative_marking,
     partial_credit,
+    only_correct_partial,
 )
 
 
 # ----------------------------------------------------------- builtins
-def test_list_builtins_returns_three():
+def test_list_builtins_returns_four():
     mods = list(list_builtins())
     names = [m.NAME for m in mods]
-    assert len(mods) == 3
+    assert len(mods) == 4
     assert all(callable(m.score) for m in mods)
     assert all(hasattr(m, "DESCRIPTION") for m in mods)
     assert all(hasattr(m, "OPTIONS") for m in mods)
     # No duplicate names — they're shown in a combo box.
-    assert len(set(names)) == 3
+    assert len(set(names)) == 4
 
 
 def test_default_options():
@@ -84,6 +85,21 @@ class TestPartialCredit:
     def test_no_correct_options(self):
         # Edge: a question with no correct answer in the key.
         assert partial_credit.score({0}, set(), 1.0, 5) == 0.0
+
+
+# ----------------------------------------------------------- only_correct_partial
+class TestOnlyCorrectPartial:
+    def test_perfect(self):
+        assert only_correct_partial.score({0, 1}, {0, 1}, 2.0, 5) == 2.0
+
+    def test_half_correct(self):
+        assert only_correct_partial.score({0}, {0, 1}, 2.0, 5) == 1.0
+
+    def test_one_correct_one_wrong_scores_zero(self):
+        assert only_correct_partial.score({0, 4}, {0, 1}, 2.0, 5) == 0.0
+
+    def test_no_correct_options(self):
+        assert only_correct_partial.score({0}, set(), 1.0, 5) == 0.0
 
 
 # ----------------------------------------------------------- negative_marking

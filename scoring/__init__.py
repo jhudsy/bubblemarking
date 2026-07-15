@@ -22,7 +22,7 @@ import importlib.util
 from types import ModuleType
 from typing import Iterable
 
-BUILTIN_NAMES = ("all_or_nothing", "partial_credit", "negative_marking")
+BUILTIN_NAMES = ("all_or_nothing", "partial_credit", "only_correct_partial", "negative_marking")
 
 
 def list_builtins() -> Iterable[ModuleType]:
