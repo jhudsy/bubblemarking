@@ -163,7 +163,9 @@ def straighten_image(original_image, **kwargs):
     lines = np.concatenate((linesTop, linesBottom))
     angles = []
     for line in lines:
-        x1, y1, x2, y2 = line[0]
+        # HoughLinesP may return shape (N, 1, 4) or (N, 4).
+        pts = line[0] if getattr(line, "ndim", 1) > 1 else line
+        x1, y1, x2, y2 = int(pts[0]), int(pts[1]), int(pts[2]), int(pts[3])
         angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
         angles.append(angle)
     angle = float(np.mean(angles))
